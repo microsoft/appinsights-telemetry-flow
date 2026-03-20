@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="1230" viewBox="0 0 980 1230" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1b2d"/>
+      <stop offset="100%" stop-color="#1a2d4a"/>
+    </linearGradient>
+    <linearGradient id="sdkGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e6fa8"/>
+      <stop offset="100%" stop-color="#1557a0"/>
+    </linearGradient>
+    <linearGradient id="scriptGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4a7c59"/>
+      <stop offset="100%" stop-color="#34623f"/>
+    </linearGradient>
+    <linearGradient id="netGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2d4a6b"/>
+      <stop offset="100%" stop-color="#1e3550"/>
+    </linearGradient>
+    <linearGradient id="azureGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0078d4"/>
+      <stop offset="100%" stop-color="#005a9e"/>
+    </linearGradient>
+    <linearGradient id="pipeGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7a3fa0"/>
+      <stop offset="100%" stop-color="#5e2d80"/>
+    </linearGradient>
+    <linearGradient id="storageGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#c25a0e"/>
+      <stop offset="100%" stop-color="#a04a0a"/>
+    </linearGradient>
+    <linearGradient id="queryGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a7a5e"/>
+      <stop offset="100%" stop-color="#125e48"/>
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="115%" height="115%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#00000066"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4da3e0"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#5dba70"/>
+    </marker>
+    <marker id="arrowWhite" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7ba8cc"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="980" height="1230" fill="url(#bgGrad)" rx="12"/>
+
+  <!-- Title -->
+  <text x="490" y="38" text-anchor="middle" fill="#e8f4ff" font-size="21" font-weight="700" letter-spacing="0.5">Application Insights Telemetry Flow</text>
+  <text x="490" y="60" text-anchor="middle" fill="#7aade0" font-size="13">Azure Monitor Ingestion Architecture</text>
+  <line x1="55" y1="73" x2="925" y2="73" stroke="#2a4a6a" stroke-width="1.5"/>
+
+  <!-- CLIENT LAYER HEADER -->
+  <text x="490" y="94" text-anchor="middle" fill="#a0c4e8" font-size="11" font-weight="600" letter-spacing="2">CLIENT LAYER</text>
+
+  <!-- ===== SDK BOX (left) ===== -->
+  <!-- y=102, height=140, bottom=242 -->
+  <rect x="55" y="102" width="380" height="140" rx="10" fill="url(#sdkGrad)" filter="url(#shadow)" stroke="#4da3e0" stroke-width="1.5"/>
+  <rect x="71" y="116" width="36" height="36" rx="6" fill="#ffffff22"/>
+  <text x="89" y="141" text-anchor="middle" fill="#90d0ff" font-size="21">⬡</text>
+  <text x="121" y="132" fill="#ffffff" font-size="14" font-weight="700">Application</text>
+  <text x="121" y="151" fill="#cce8ff" font-size="12">with App Insights SDK</text>
+  <line x1="71" y1="163" x2="420" y2="163" stroke="#4da3e066" stroke-width="1"/>
+  <text x="82" y="182" fill="#a8d4f5" font-size="12">▸ SDK auto-instruments HTTP, exceptions, dependencies</text>
+  <text x="82" y="202" fill="#a8d4f5" font-size="12">▸ Buffers telemetry, applies sampling &amp; enrichment</text>
+  <text x="82" y="222" fill="#a8d4f5" font-size="12">▸ Sends via InstrumentationKey / Connection String</text>
+
+  <!-- ===== SCRIPT BOX (right) ===== -->
+  <!-- y=102, height=140, bottom=242 -->
+  <rect x="545" y="102" width="380" height="140" rx="10" fill="url(#scriptGrad)" filter="url(#shadow)" stroke="#5dba70" stroke-width="1.5"/>
+  <rect x="561" y="116" width="36" height="36" rx="6" fill="#ffffff22"/>
+  <text x="579" y="141" text-anchor="middle" fill="#a0e8b0" font-size="21">⌨</text>
+  <text x="611" y="132" fill="#ffffff" font-size="14" font-weight="700">Diagnostic Script</text>
+  <text x="611" y="151" fill="#c8f0d0" font-size="12">PowerShell / Bash  ·  Raw REST Client</text>
+  <line x1="561" y1="163" x2="910" y2="163" stroke="#5dba7066" stroke-width="1"/>
+  <text x="572" y="182" fill="#a8e8b8" font-size="12">▸ No SDK loaded — simulates customer app path purely</text>
+  <text x="572" y="202" fill="#a8e8b8" font-size="12">▸ Sends a single raw telemetry record via REST</text>
+  <text x="572" y="222" fill="#a8e8b8" font-size="12">▸ Isolates network/infra issues from SDK behavior</text>
+
+  <!-- Merge note -->
+  <text x="490" y="265" text-anchor="middle" fill="#7aade0" font-size="11" font-style="italic">Both clients traverse identical network &amp; ingestion path ↓</text>
+
+  <!-- Dashed arrows from boxes converging -->
+  <line x1="245" y1="242" x2="245" y2="278" stroke="#4da3e0" stroke-width="2" stroke-dasharray="5,3"/>
+  <line x1="735" y1="242" x2="735" y2="278" stroke="#5dba70" stroke-width="2" stroke-dasharray="5,3"/>
+  <line x1="245" y1="278" x2="490" y2="296" stroke="#4da3e0" stroke-width="2" stroke-dasharray="5,3"/>
+  <line x1="735" y1="278" x2="490" y2="296" stroke="#5dba70" stroke-width="2" stroke-dasharray="5,3"/>
+  <polygon points="485,296 495,296 490,304" fill="#7ba8cc"/>
+
+  <!-- SHARED PATH HEADER -->
+  <text x="490" y="320" text-anchor="middle" fill="#a0c4e8" font-size="11" font-weight="600" letter-spacing="2">SHARED NETWORK &amp; INGESTION PATH</text>
+
+  <!-- ===== DNS BOX ===== -->
+  <!-- y=330, height=92, bottom=422 -->
+  <rect x="253" y="330" width="474" height="92" rx="9" fill="url(#netGrad)" filter="url(#shadow)" stroke="#4da3e044" stroke-width="1.5"/>
+  <rect x="268" y="343" width="32" height="32" rx="5" fill="#ffffff18"/>
+  <text x="284" y="366" text-anchor="middle" fill="#7ab8e0" font-size="17">🌐</text>
+  <text x="313" y="357" fill="#ffffff" font-size="14" font-weight="700">DNS Resolution</text>
+  <text x="313" y="377" fill="#88b8d8" font-size="13">dc.services.visualstudio.com  ·  {region}.in.applicationinsights.azure.com</text>
+  <text x="313" y="397" fill="#6898b8" font-size="13">AMPLS: Private DNS zones override public resolution → private IPs</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="422" x2="490" y2="443" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== TCP BOX ===== -->
+  <!-- y=448, height=92, bottom=540 -->
+  <rect x="253" y="448" width="474" height="92" rx="9" fill="url(#netGrad)" filter="url(#shadow)" stroke="#4da3e044" stroke-width="1.5"/>
+  <rect x="268" y="461" width="32" height="32" rx="5" fill="#ffffff18"/>
+  <text x="284" y="484" text-anchor="middle" fill="#7ab8e0" font-size="17">🔌</text>
+  <text x="313" y="475" fill="#ffffff" font-size="14" font-weight="700">TCP Connection  ·  Port 443 Outbound</text>
+  <text x="313" y="495" fill="#88b8d8" font-size="13">Three-way handshake to resolved Azure endpoint IP</text>
+  <text x="313" y="515" fill="#6898b8" font-size="13">NSG / Firewall / Proxy / Private Endpoint intercept here</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="540" x2="490" y2="561" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== TLS BOX ===== -->
+  <!-- y=566, height=92, bottom=658 -->
+  <rect x="253" y="566" width="474" height="92" rx="9" fill="url(#netGrad)" filter="url(#shadow)" stroke="#4da3e044" stroke-width="1.5"/>
+  <rect x="268" y="579" width="32" height="32" rx="5" fill="#ffffff18"/>
+  <text x="284" y="602" text-anchor="middle" fill="#7ab8e0" font-size="17">🔒</text>
+  <text x="313" y="593" fill="#ffffff" font-size="14" font-weight="700">TLS Handshake  ·  1.2 / 1.3</text>
+  <text x="313" y="613" fill="#88b8d8" font-size="13">Certificate validation  ·  Cipher negotiation  ·  Session establishment</text>
+  <text x="313" y="633" fill="#6898b8" font-size="13">TLS inspection proxies may break chain — test with openssl s_client</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="658" x2="490" y2="679" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== AZURE ENDPOINT BOX ===== -->
+  <!-- y=684, height=110, bottom=794 -->
+  <rect x="192" y="684" width="596" height="110" rx="9" fill="url(#azureGrad)" filter="url(#shadow)" stroke="#60a8e8" stroke-width="2"/>
+  <rect x="208" y="698" width="34" height="34" rx="5" fill="#ffffff22"/>
+  <text x="225" y="722" text-anchor="middle" fill="#c0e0ff" font-size="19">☁</text>
+  <text x="256" y="711" fill="#ffffff" font-size="14" font-weight="700">Azure Monitor Ingestion Endpoint</text>
+  <text x="256" y="732" fill="#c0dcf5" font-size="13">POST  /v2.1/track   ·   Content-Type: application/json</text>
+  <text x="256" y="752" fill="#90c0e8" font-size="13">HTTP 200 = accepted  ·  206 = partial  ·  400 = schema error  ·  429 = throttled</text>
+  <text x="256" y="772" fill="#90c0e8" font-size="13">Live Metrics stream: /QuickPulse  ·  Endpoints differ between national clouds</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="794" x2="490" y2="815" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== INGESTION PIPELINE BOX ===== -->
+  <!-- y=820, height=158, bottom=978 -->
+  <rect x="192" y="820" width="596" height="158" rx="9" fill="url(#pipeGrad)" filter="url(#shadow)" stroke="#a070d0" stroke-width="1.5"/>
+  <rect x="208" y="834" width="34" height="34" rx="5" fill="#ffffff22"/>
+  <text x="225" y="858" text-anchor="middle" fill="#d0a0ff" font-size="19">⚙</text>
+  <text x="256" y="848" fill="#ffffff" font-size="14" font-weight="700">Ingestion Pipeline</text>
+  <text x="256" y="868" fill="#d0b8f0" font-size="13">Server-side processing stages applied after endpoint accepts payload</text>
+  <!-- Chip row -->
+  <rect x="256" y="880" width="74" height="24" rx="4" fill="#ffffff22"/>
+  <text x="293" y="897" text-anchor="middle" fill="#f0d8ff" font-size="12" font-weight="600">🔑 Auth</text>
+  <rect x="338" y="880" width="94" height="24" rx="4" fill="#ffffff22"/>
+  <text x="385" y="897" text-anchor="middle" fill="#f0d8ff" font-size="12" font-weight="600">🎲 Sampling</text>
+  <rect x="440" y="880" width="120" height="24" rx="4" fill="#ffffff22"/>
+  <text x="500" y="897" text-anchor="middle" fill="#f0d8ff" font-size="12" font-weight="600">⚡ DCR Transforms</text>
+  <rect x="568" y="880" width="98" height="24" rx="4" fill="#ffffff22"/>
+  <text x="617" y="897" text-anchor="middle" fill="#f0d8ff" font-size="12" font-weight="600">📊 Daily Cap</text>
+  <rect x="674" y="880" width="98" height="24" rx="4" fill="#ffffff22"/>
+  <text x="723" y="897" text-anchor="middle" fill="#f0d8ff" font-size="12" font-weight="600">🏷 Enrichment</text>
+  <!-- Detail lines -->
+  <text x="256" y="924" fill="#c0a0e8" font-size="13">▸ Auth: iKey / ConnStr → workspace routing    ▸ Ingestion sampling: drop</text>
+  <text x="256" y="944" fill="#c0a0e8" font-size="13">▸ DCR Transforms: filter / project / rename columns before storage</text>
+  <!-- Warning strip -->
+  <rect x="208" y="955" width="564" height="17" rx="3" fill="#ffffff11"/>
+  <text x="490" y="968" text-anchor="middle" fill="#f0b8ff" font-size="13" font-weight="600">⚠  Telemetry may be silently dropped here — not an SDK or network issue</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="978" x2="490" y2="999" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== STORAGE BOX ===== -->
+  <!-- y=1004, height=92, bottom=1096 -->
+  <rect x="192" y="1004" width="596" height="92" rx="9" fill="url(#storageGrad)" filter="url(#shadow)" stroke="#e0803066" stroke-width="1.5"/>
+  <rect x="208" y="1017" width="34" height="34" rx="5" fill="#ffffff22"/>
+  <text x="225" y="1041" text-anchor="middle" fill="#ffb870" font-size="19">🗄</text>
+  <text x="256" y="1031" fill="#ffffff" font-size="14" font-weight="700">Storage</text>
+  <text x="256" y="1051" fill="#f0c090" font-size="13">Application Insights → Log Analytics Workspace (workspace-based)</text>
+  <text x="256" y="1071" fill="#DCA46C" font-size="13">Ingestion latency: 0-5 min typical  ·  Retention: configurable 30–730 days</text>
+
+  <!-- Arrow -->
+  <line x1="490" y1="1096" x2="490" y2="1117" stroke="#5a8ab0" stroke-width="2" marker-end="url(#arrowWhite)"/>
+
+  <!-- ===== QUERY BOX ===== -->
+  <!-- y=1122, height=92, bottom=1214(ish) handled by footer-->
+  <rect x="192" y="1122" width="596" height="72" rx="9" fill="url(#queryGrad)" filter="url(#shadow)" stroke="#30a87866" stroke-width="1.5"/>
+  <rect x="208" y="1135" width="34" height="34" rx="5" fill="#ffffff22"/>
+  <text x="225" y="1159" text-anchor="middle" fill="#80e8c0" font-size="19">🔍</text>
+  <text x="256" y="1149" fill="#ffffff" font-size="14" font-weight="700">Query &amp; Visualization</text>
+  <text x="256" y="1169" fill="#90e0c0" font-size="13">KQL via Application Insights Portal  ·  Log Analytics  ·  REST API  ·  Azure Workbooks</text>
+
+  <!-- Footer -->
+  <line x1="55" y1="1206" x2="925" y2="1206" stroke="#2a4a6a" stroke-width="1"/>
+  <text x="490" y="1220" text-anchor="middle" fill="#4A7EAE" font-size="11">Azure Monitor · Application Insights · Telemetry Architecture  |  Blue = SDK client  ·  Green = Diagnostic Script (raw REST)</text>
+</svg>
