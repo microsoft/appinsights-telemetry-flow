@@ -3,6 +3,27 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# ----- appinsights-telemetry-flow: Diagnostic output (may contain customer data) -----
+AppInsights-Diag_*.json
+AppInsights-Diag_*.txt
+AppInsights-Agent-Diag_*.json
+AppInsights-Agent-Diag_*.txt
+AppInsights-AgentDiag_*.json
+AppInsights-AgentDiag_*.txt
+
+# ----- OS files -----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.directory
+
+# ----- PowerShell -----
+output/
+
 # User-specific files
 *.rsuser
 *.suo
