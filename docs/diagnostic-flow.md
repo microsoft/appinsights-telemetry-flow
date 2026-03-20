@@ -10,7 +10,7 @@
 - [Design Philosophy](#design-philosophy)
 - [Phase Map](#phase-map)
 - [Phase-by-Phase Walkthrough](#phase-by-phase-walkthrough)
-  - [Phase 0: Initialisation](#phase-0-initialisation)
+  - [Phase 0: Initialization](#phase-0-initialization)
   - [Phase 1: Environment Detection](#phase-1-environment-detection)
   - [Phase 2: Connection String Validation](#phase-2-connection-string-validation)
   - [Phase 3: Consent Gates](#phase-3-consent-gates)
@@ -391,20 +391,21 @@ found in Phase 7.
 |---|-----------|---------------|
 | 1 | **Authentication mode** | `properties.DisableLocalAuth` on the AI resource |
 | 2 | **Ingestion sampling** | `properties.IngestionMode` / sampling percentage |
-| 3 | **Backend LA workspace health** | ARM GET on `WorkspaceResourceId` — provisioning state, quotaNextResetTime, sku |
-| 4 | **Daily cap settings** | AI daily cap vs. LA daily cap — detects mismatches and OverQuota |
+| 3 | **Backend LA workspace** | ARM GET on `WorkspaceResourceId` — existence, subscription status, access mode |
+| 4 | **Daily cap** | LA workspace capping status (OverQuota / SubscriptionSuspended), then AI daily cap vs. LA daily cap comparison with multi-branch decision tree |
 | 5 | **Diagnostic Settings** | ARM GET on AI resource diagnostic settings — detects duplication to same workspace |
 | 6 | **Workspace transforms / DCRs** | Resource Graph query for DCRs targeting AI-related tables |
 
 **Findings produced:**
 - **Local Authentication Disabled** (INFO)
 - **Ingestion Sampling Enabled** (INFO)
-- **Log Analytics Daily Cap Reached** (BLOCKING)
-- **Azure Subscription Suspended** (BLOCKING)
 - **Backend Log Analytics Workspace Not Found** (BLOCKING)
 - **Cannot Query Backend LA Workspace** (INFO)
+- **Log Analytics Daily Cap Reached** (BLOCKING)
+- **Azure Subscription Suspended** (BLOCKING)
 - **Daily Cap Mismatch LA < AI** (WARNING)
-- **Log Analytics Daily Cap is the Effective Limit** (INFO)
+- **Daily Cap: AI Cap OFF, LA Workspace Has Cap** (WARNING)
+- **Daily Cap: Low Cap Advisory** (INFO)
 - **Workspace Access: Require Workspace Permissions** (INFO)
 - **Diagnostic Settings Exporting to LA** (INFO)
 - **Workspace Transforms Detected** (INFO)
@@ -438,7 +439,8 @@ pipeline), `-SkipIngestionTest` not set.
   - HTTP 200 → telemetry accepted.
   - HTTP 401 + local auth disabled → expected (Entra ID enforcement).
   - HTTP 401/403 without known context → BLOCKING finding.
-  - HTTP 429/439 → daily cap / throttling.
+  - HTTP 429 → throttling / rate limiting (transient).
+  - HTTP 439 → daily cap reached (not transient — cap must reset or be raised).
 - If ingestion passed and local auth was reported as disabled by ARM → raises
   an INFO finding about ARM/ingestion auth mismatch.
 

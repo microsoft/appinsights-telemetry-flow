@@ -88,7 +88,7 @@ diagnosis item in a single structured object:
 
 ```json
 {
-  "ToolVersion": "1.0.0",
+  "ToolVersion": "1.1.0",
   "Timestamp": "2026-03-03T14:30:00Z",
   "Environment": {
     "ComputerName": "WEBAPP-PROD-01",

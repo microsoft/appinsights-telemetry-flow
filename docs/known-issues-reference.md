@@ -376,7 +376,7 @@ the suspension window is **not recoverable**.
 You configured a daily cap on the Application Insights resource (the classic/legacy cap),
 but data stops before that cap is reached. Or you removed the AI daily cap expecting
 unlimited ingestion, but the Log Analytics workspace has its own cap that kicks in first.
-The mismatch in daily cap settings causes silent data loss because the more restrictive cap wins.
+The mismatch in daily cap configurations causes silent data loss because the more restrictive cap wins.
 
 ### Why It Happens
 
@@ -400,15 +400,20 @@ The script fetches the AI-level daily cap from the legacy PricingPlans API:
 GET {aiId}/PricingPlans/current?api-version=2017-10-01
 ```
 
-It then compares this against the workspace-level `dailyQuotaGb` using five-branch logic:
+It then compares this against the workspace-level `dailyQuotaGb` using a multi-branch
+decision tree. After checking for OverQuota and SubscriptionSuspended (which are handled
+as separate BLOCKING findings), the script evaluates the cap alignment:
 
 | AI Cap | LA Cap | Result |
 |--------|--------|--------|
 | Set | LA < AI | **WARNING** — LA cap is more restrictive, silent data drop risk |
-| Off | LA has cap | **INFO** — LA cap is the effective limit (may be intentional) |
+| Off | LA has cap | **WARNING** — AI cap is OFF but LA workspace has a cap; LA cap is the effective limit. Other data sources (AMA agents, Sentinel, etc.) also contribute toward this cap. |
+| Both | Off | OK — no caps configured |
+| Set | LA unlimited | OK — only AI cap applies |
 | Set | LA >= AI | OK — caps are properly aligned |
-| Set | LA off | OK — only AI cap applies |
-| Off | Off | OK — no caps configured |
+| Any | Low cap (< 1 GB) | **INFO** — low daily cap advisory; may cause frequent data loss |
+
+The script also treats an AI daily cap >= 9999 GB as effectively OFF (unlimited).
 
 ### How to Fix It
 

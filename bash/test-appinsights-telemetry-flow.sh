@@ -3,7 +3,7 @@
 # test-appinsights-telemetry-flow.sh
 # Application Insights Telemetry Flow Diagnostics (Bash/Linux)
 # ============================================================================
-# Version: 1.0.0
+# Version: 1.1.0
 # Author:  Todd Foust (Microsoft)
 # Source:  https://github.com/microsoft/appinsights-telemetry-flow
 #
@@ -42,7 +42,7 @@ set -o pipefail
 # CONFIGURATION
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCRIPT_NAME="$(basename "$0")"
 
 # --- Parameter defaults ---
@@ -105,7 +105,7 @@ DNS_STEP_NUMBER=0
 show_help() {
     cat <<'HELPEOF'
 Application Insights Telemetry Flow Diagnostics (Bash/Linux)
-Version 1.0.0
+Version 1.1.0
 
 SYNOPSIS
     test-appinsights-telemetry-flow.sh [OPTIONS]
@@ -498,7 +498,7 @@ setup_colors() {
         C_DARK_RED='\033[0;31m'
         C_GREEN='\033[0;32m'
         C_YELLOW='\033[0;93m'
-        C_DARK_YELLOW='\033[0;33m'   
+        C_DARK_YELLOW='\033[0;33m'
         C_CYAN='\033[0;96m'
         C_DARK_CYAN='\033[0;36m'
         C_WHITE='\033[1;37m'
@@ -893,6 +893,13 @@ render_diagnosis_summary() {
                 _print -c "$C_GRAY" "  All connectivity and resource configuration checks passed."
                 _print -c "$C_GRAY" "  If telemetry from your application is still missing, the issue is likely"
                 _print -c "$C_GRAY" "  in SDK/agent configuration, not network connectivity."
+                _print ""
+                _print -c "$C_CYAN" "  Next steps -- investigate the SDK/Agent:"
+                _print -c "$C_GRAY" "    1. Enable SDK self-diagnostics to see what the SDK is doing internally"
+                _print -c "$C_GRAY" "    2. Review SDK Stats for drop codes, auth failures, and sampling decisions"
+                _print ""
+                _print -c "$C_GRAY" "  Docs: (SDK Logging) https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/enable-self-diagnostics"
+                _print -c "$C_GRAY" "  Docs: (SDK Stats)   https://learn.microsoft.com/azure/azure-monitor/app/sdk-stats"
             elif $SKIP_INGESTION_TEST; then
                 _print -c "$C_GRAY" "  Network connectivity and Azure resource configuration checks all passed."
                 _print -c "$C_GRAY" "  The telemetry ingestion test was not performed (--skip-ingestion-test)."
@@ -903,6 +910,13 @@ render_diagnosis_summary() {
                 _print -c "$C_GRAY" "  All connectivity and resource configuration checks passed."
                 _print -c "$C_GRAY" "  If telemetry from your application is still missing, the issue is likely"
                 _print -c "$C_GRAY" "  in SDK/agent configuration, not network connectivity."
+                _print ""
+                _print -c "$C_CYAN" "  Next steps -- investigate the SDK/Agent:"
+                _print -c "$C_GRAY" "    1. Enable SDK self-diagnostics to see what the SDK is doing internally"
+                _print -c "$C_GRAY" "    2. Review SDK Stats for drop codes, auth failures, and sampling decisions"
+                _print ""
+                _print -c "$C_GRAY" "  Docs: (SDK Logging) https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/enable-self-diagnostics"
+                _print -c "$C_GRAY" "  Docs: (SDK Stats)   https://learn.microsoft.com/azure/azure-monitor/app/sdk-stats"
             fi
         else
             _print -c "$C_WHITE" " ========================================================================"
@@ -941,10 +955,12 @@ render_diagnosis_summary() {
         local findings_label
         (( total_issues == 1 )) && findings_label="1 finding" || findings_label="$total_issues findings"
 
-        # Header color: red if any BLOCKING, yellow otherwise
-        local header_color="$C_DARK_YELLOW"
+        # Header color: red if any BLOCKING, dark-yellow if WARNING, yellow if INFO only
+        local header_color="$C_YELLOW"
         if (( ${#blocking_items[@]} > 0 )); then
             header_color="$C_RED"
+        elif (( ${#warning_items[@]} > 0 )); then
+            header_color="$C_DARK_YELLOW"
         fi
 
         _print -c "$C_WHITE" " ========================================================================"
@@ -1239,7 +1255,7 @@ validate_azure_monitor_endpoint() {
 #   Escapes single quotes for safe interpolation into KQL/ARG query strings.
 #   Replaces ' with '' (KQL escape convention).
 sanitize_single_quotes() {
-    echo "${1//\'/\'\'}" 
+    echo "${1//\'/\'\'}"
 }
 
 # --- UUID ---
@@ -1326,16 +1342,16 @@ request_user_consent() {
 
     # Interactive: show consent box and prompt Y/N
     _print ""
-    _print -c "$C_DARK_CYAN" "  ================================================================"        
+    _print -c "$C_DARK_CYAN" "  ================================================================"
     _print -c "$C_CYAN" "  $prompt_title"
-    _print -c "$C_DARK_CYAN" "  ================================================================"        
+    _print -c "$C_DARK_CYAN" "  ================================================================"
     local line
     for line in "${prompt_lines[@]}"; do
         _print -c "$C_GRAY" "  $line"
     done
     _print ""
     _print -c "$C_DARK_GRAY" "  $skip_hint"
-    _print -c "$C_DARK_CYAN" "  ================================================================"        
+    _print -c "$C_DARK_CYAN" "  ================================================================"
     _print ""
     local response
     read -r -p "  $prompt_question " response
@@ -1665,6 +1681,8 @@ test_dns_resolution() {
     DNS_RESULT_DETAIL=""
     DNS_RESULT_FAILURE_LABEL=""
 
+    _debug "DNS resolving: $hostname"
+
     if $HAS_DIG; then
         local start_ms end_ms ip_line
         start_ms="$(get_ms_timestamp)"
@@ -1684,6 +1702,17 @@ test_dns_resolution() {
             fi
         else
             classify_dig_failure "$hostname"
+        fi
+
+        # Debug: show full dig output with CNAME chain, DNS server, TTLs
+        if $DEBUG_MODE; then
+            local dig_trace
+            dig_trace="$(dig +noall +answer +authority +comments +question "$hostname" 2>/dev/null)"
+            if [[ -n "$dig_trace" ]]; then
+                while IFS= read -r line; do
+                    _debug "  dig: $line"
+                done <<< "$dig_trace"
+            fi
         fi
 
     elif $HAS_NSLOOKUP; then
@@ -1713,10 +1742,19 @@ test_dns_resolution() {
         else
             classify_nslookup_failure "$hostname" "$ns_output"
         fi
+
+        # Debug: show full nslookup output (Server, Aliases/CNAME chain, Addresses)
+        if $DEBUG_MODE; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && _debug "  nslookup: $line"
+            done <<< "$ns_output"
+        fi
     else
         DNS_RESULT_FAILURE_LABEL="(no DNS tool)"
         DNS_RESULT_DETAIL="No DNS tool available (install dig or nslookup)"
     fi
+
+    _debug "DNS result: $hostname -> ${DNS_RESULT_IP:-FAIL} [${DNS_RESULT_DURATION}ms] ($DNS_RESULT_STATUS)"
 }
 
 # render_dns_table -- verbose tabular output matching PS1 format
@@ -2132,6 +2170,7 @@ INGEST_RESULT_RESPONSE_BODY=""
 INGEST_RESULT_TEST_RECORD_ID=""
 INGEST_RESULT_TEST_TIMESTAMP=""
 INGEST_RESULT_ENDPOINT=""
+MANUAL_VERIFY_REASON=""
 
 test_ingestion_endpoint() {
     local ingestion_url="${1%/}"    # trim trailing slash
@@ -2276,11 +2315,11 @@ ENDJSON
             ;;
         429)
             INGEST_RESULT_DETAIL="HTTP 429 Too Many Requests (Throttled)"
-            INGEST_RESULT_ACTION="You are being rate-limited. This typically occurs when ingestion volume is extremely high or the daily cap has been reached."
+            INGEST_RESULT_ACTION="You are being rate-limited. This typically occurs when ingestion volume is extremely high. Retry after a brief delay."
             ;;
         439)
-            INGEST_RESULT_DETAIL="HTTP 439 Too Many Requests (Client)"
-            INGEST_RESULT_ACTION="Client-side rate limiting triggered. Too many items sent in a short period."
+            INGEST_RESULT_DETAIL="HTTP 439 Daily Cap Reached"
+            INGEST_RESULT_ACTION="The App Insights daily ingestion cap has been reached. No more data will be accepted until the cap resets at the configured reset hour (UTC). Check App Insights > Usage and estimated costs > Daily Cap."
             ;;
         500)
             INGEST_RESULT_DETAIL="HTTP 500 Internal Server Error"
@@ -3982,6 +4021,7 @@ main() {
         _print -c "$C_GRAY" "  - If using AMPLS: All endpoints resolve to PRIVATE IPs consistently"
         _print -c "$C_GRAY" "  - If NOT using AMPLS: All endpoints resolve to PUBLIC Microsoft IPs"
         _print -c "$C_GRAY" "  - No mixed public/private results (indicates incomplete AMPLS setup)"
+        _print -c "$C_GRAY" "  - Exception: js.monitor.azure.com (JS SDK CDN) is expected to remain public with AMPLS"
         _print ""
 
         local dns_servers
@@ -4076,6 +4116,25 @@ main() {
         fi
     done
 
+    # --- Determine if only the JS SDK CDN (js.monitor.azure.com) resolved to public ---
+    # AMPLS/Private Endpoint DNS zones never include js.monitor.azure.com, so it is
+    # expected to resolve to a public IP even in a fully-configured AMPLS environment.
+    # If that is the ONLY public endpoint and all others are private, treat as "all private".
+    local js_cdn_only_public=false
+    if $has_ampls_signals && $has_public_ips; then
+        local non_js_cdn_public=0
+        for i in "${!DNS_R_HOSTNAME[@]}"; do
+            if [[ "${DNS_R_STATUS[$i]}" == "PASS" && "${DNS_R_PRIVATE[$i]}" != "true" \
+                  && "${DNS_R_HOSTNAME[$i]}" != "js.monitor.azure.com" ]]; then
+                (( non_js_cdn_public++ ))
+            fi
+        done
+        if (( non_js_cdn_public == 0 )); then
+            js_cdn_only_public=true
+            has_public_ips=false
+        fi
+    fi
+
     # --- DNS progress line ---
     if (( dns_fail_count == 0 )); then
         local ip_type="all public IPs"
@@ -4112,6 +4171,13 @@ main() {
     # --- DNS verbose table (after progress line) ---
     if $VERBOSE_OUTPUT && ! $dns_skipped_no_tool; then
         render_dns_table
+
+        # Show JS SDK CDN note when it was the only public endpoint in an AMPLS environment
+        if $js_cdn_only_public; then
+            _print -c "$C_DARK_GRAY" "  NOTE: js.monitor.azure.com (JS SDK CDN) resolved to a public IP. This is expected."
+            _print -c "$C_DARK_GRAY" "  AMPLS private DNS zones do not include the JavaScript SDK CDN hostname."
+            _print ""
+        fi
     fi
 
     # ================================================================
@@ -5412,11 +5478,19 @@ main() {
                 else
                     # App Insights resource not found
                     write_progress_line "AMPLS Validation" "INFO" "App Insights resource not found for this iKey"
-                    local not_found_detail="The resource may be in a different tenant or a subscription your account cannot access."
-                    local not_found_action="Ensure you have Reader access to the subscription containing this App Insights resource."
-                    if [[ -z "$TENANT_ID" ]]; then
-                        not_found_action+=" If your account spans multiple tenants, specify --tenant-id to target the correct one."
-                    fi
+                    local current_user
+                    current_user="$(az account show --query 'user.name' -o tsv 2>/dev/null | tr -d '\r')"
+                    local masked_user
+                    masked_user="$(mask_email "$current_user")"
+                    local not_found_detail="Current identity: ${masked_user:-<unknown>}. The resource may be in a different tenant, a subscription this account cannot access, or you may be logged in with the wrong identity."
+                    local not_found_action
+                    not_found_action="Possible fixes:
+      1. If you are logged in as the WRONG user, switch identity:
+           az logout
+           az login           (log in with the account that owns the App Insights resource)
+      2. If you need a DIFFERENT TENANT, re-run with:
+           --tenant-id 'your-tenant-id-or-domain.onmicrosoft.com'
+      3. Ensure this account has Reader access to the subscription containing the App Insights resource."
                     write_result "INFO" "App Insights resource not found for iKey: $masked_key" \
                         "$not_found_detail" "$not_found_action"
                     if [[ -z "$TENANT_ID" ]]; then
@@ -5424,9 +5498,9 @@ main() {
                         az_tenant_id="$(az account show --query 'tenantId' -o tsv 2>/dev/null)"
                         az_tenant_id="${az_tenant_id//$'\r'/}"
                         add_diagnosis "INFO" "App Insights Resource Not Found" \
-                            "Cannot find AI resource in tenant (wrong tenant?)" \
-                            "Could not find the AI resource in tenant ${az_tenant_id:-unknown}. If your account has access to multiple Entra ID tenants, re-run with --tenant-id to target the correct tenant." \
-                            "Re-run with --tenant-id 'your-tenant-id-or-domain.onmicrosoft.com'" \
+                            "Cannot find AI resource in tenant (wrong tenant or wrong identity?)" \
+                            "Could not find the AI resource in tenant ${az_tenant_id:-unknown}. You are logged in as ${masked_user:-<unknown>}. If this identity does not have access to the App Insights resource, log out and log back in with the correct account. If your account has access to multiple Entra ID tenants, re-run with --tenant-id to target the correct tenant." \
+                            "az logout && az login, or re-run with --tenant-id 'your-tenant-id-or-domain.onmicrosoft.com'" \
                             "" \
                             "https://learn.microsoft.com/cli/azure/authenticate-azure-cli"
                     fi
@@ -5470,31 +5544,60 @@ main() {
     # ================================================================
     if [[ -n "$LOOKUP_AMPLS_IP" ]]; then
         (( STEP_NUMBER++ ))
-        write_header_always "STEP $STEP_NUMBER: AMPLS Reverse-Lookup (Manual)"
-        _print ""
-        _print -c "$C_GRAY" "  Validating IP: $LOOKUP_AMPLS_IP"
+        write_header "STEP $STEP_NUMBER: AMPLS Reverse-Lookup (Manual)"
+        if $VERBOSE_OUTPUT; then
+            _print ""
+            _print -c "$C_CYAN" "  WHY THIS MATTERS:"
+            _print -c "$C_GRAY" "  When DNS resolves Azure Monitor endpoints to private IPs, a 'ghost' AMPLS (an AMPLS"
+            _print -c "$C_GRAY" "  you don't manage) can intercept your telemetry. This happens because ALL AMPLS resources"
+            _print -c "$C_GRAY" "  in the tenant share the same privatelink DNS zones. If another team's AMPLS has"
+            _print -c "$C_GRAY" "  'Private Only' ingestion mode and your resource isn't linked to it, your data is"
+            _print -c "$C_GRAY" "  silently dropped -- even though DNS resolved successfully."
+            _print ""
+            _print -c "$C_CYAN" "  WHAT WE'RE CHECKING:"
+            _print -c "$C_GRAY" "  - Validate the IP is a private (RFC1918) address seen during this run's DNS checks"
+            _print -c "$C_GRAY" "  - Trace the IP back through Azure: NIC -> Private Endpoint -> AMPLS resource"
+            _print -c "$C_GRAY" "  - Report the owning AMPLS name, resource group, subscription, and access modes"
+            _print -c "$C_GRAY" "  - Flag if the AMPLS uses 'Private Only' mode (which blocks non-linked resources)"
+            _print ""
+            _print -c "$C_GRAY" "  Validating IP: $LOOKUP_AMPLS_IP"
+        fi
+
+        write_progress_start "AMPLS Reverse-Lookup"
 
         validate_ampls_ip_parameter "$LOOKUP_AMPLS_IP"
         if ! $AMPLS_IP_VALID; then
+            write_progress_line "AMPLS Reverse-Lookup" "FAIL" "IP validation failed for $LOOKUP_AMPLS_IP"
             write_result "FAIL" "IP validation failed"
-            _print ""
-            _print -c "$C_YELLOW" "  $AMPLS_IP_REASON"
-            _print ""
+            if $VERBOSE_OUTPUT; then
+                _print ""
+                _print -c "$C_YELLOW" "  $AMPLS_IP_REASON"
+                _print ""
+            fi
+            add_diagnosis "WARNING" "Manual Lookup: IP validation failed for $LOOKUP_AMPLS_IP" \
+                "$AMPLS_IP_REASON" \
+                "The --lookup-ampls-ip value '$LOOKUP_AMPLS_IP' failed validation. The IP must be a valid private (RFC1918) IPv4 address that was resolved by one of the Azure Monitor endpoints tested during this run." \
+                "Re-run the script and supply a private IP address that appears in the DNS resolution results. Use verbose output to see which IPs were resolved." \
+                "" \
+                "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
         else
             write_result "PASS" "IP validated -- running reverse lookup"
             if find_ampls_by_private_ip "$LOOKUP_AMPLS_IP"; then
-                _print ""
-                _print -n -c "$C_CYAN" "  AMPLS IDENTIFIED: "
-                _print -c "$C_WHITE" "$GHOST_AMPLS_NAME"
-                _print -c "$C_GRAY" "    Resource Group:   $GHOST_AMPLS_RG"
-                _print -c "$C_GRAY" "    Subscription:     $GHOST_AMPLS_SUB"
-                _print -c "$C_GRAY" "    Private Endpoint: $GHOST_AMPLS_PE_NAME ($GHOST_AMPLS_PE_RG)"
-                _print -c "$C_GRAY" "    Access Modes:     Ingestion=$GHOST_AMPLS_ING_MODE, Query=$GHOST_AMPLS_Q_MODE"
-                _print -c "$C_DARK_GRAY" "    Looked up IP:     $LOOKUP_AMPLS_IP"
-                _print ""
-                _print -c "$C_YELLOW" "  This AMPLS owns the private endpoint associated with IP $LOOKUP_AMPLS_IP."
-                _print -c "$C_YELLOW" "  If this is not your expected AMPLS, add your resource to this AMPLS or set its access mode to 'Open'."
-                _print ""
+                write_progress_line "AMPLS Reverse-Lookup" "INFO" "AMPLS '$GHOST_AMPLS_NAME' owns IP $LOOKUP_AMPLS_IP (Ingestion=$GHOST_AMPLS_ING_MODE, Query=$GHOST_AMPLS_Q_MODE)"
+                if $VERBOSE_OUTPUT; then
+                    _print ""
+                    _print -n -c "$C_CYAN" "  AMPLS IDENTIFIED: "
+                    _print -c "$C_WHITE" "$GHOST_AMPLS_NAME"
+                    _print -c "$C_GRAY" "    Resource Group:   $GHOST_AMPLS_RG"
+                    _print -c "$C_GRAY" "    Subscription:     $GHOST_AMPLS_SUB"
+                    _print -c "$C_GRAY" "    Private Endpoint: $GHOST_AMPLS_PE_NAME ($GHOST_AMPLS_PE_RG)"
+                    _print -c "$C_GRAY" "    Access Modes:     Ingestion=$GHOST_AMPLS_ING_MODE, Query=$GHOST_AMPLS_Q_MODE"
+                    _print -c "$C_DARK_GRAY" "    Looked up IP:     $LOOKUP_AMPLS_IP"
+                    _print ""
+                    _print -c "$C_YELLOW" "  This AMPLS owns the private endpoint associated with IP $LOOKUP_AMPLS_IP."
+                    _print -c "$C_YELLOW" "  If this is not your expected AMPLS, add your resource to this AMPLS or set its access mode to 'Open'."
+                    _print ""
+                fi
 
                 add_diagnosis "INFO" "Manual Lookup: AMPLS '$GHOST_AMPLS_NAME' owns IP $LOOKUP_AMPLS_IP" \
                     "AMPLS '$GHOST_AMPLS_NAME' in RG '$GHOST_AMPLS_RG' owns the private endpoint for IP $LOOKUP_AMPLS_IP" \
@@ -5503,11 +5606,14 @@ main() {
                     "" \
                     "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
             else
-                _print ""
-                _print -c "$C_YELLOW" "  The private endpoint for IP $LOOKUP_AMPLS_IP could not be identified."
-                _print -c "$C_GRAY" "  It may be in a subscription your account cannot access, or the private"
-                _print -c "$C_GRAY" "  DNS zone may have been configured manually."
-                _print ""
+                write_progress_line "AMPLS Reverse-Lookup" "WARN" "No AMPLS found for IP $LOOKUP_AMPLS_IP"
+                if $VERBOSE_OUTPUT; then
+                    _print ""
+                    _print -c "$C_YELLOW" "  The private endpoint for IP $LOOKUP_AMPLS_IP could not be identified."
+                    _print -c "$C_GRAY" "  It may be in a subscription your account cannot access, or the private"
+                    _print -c "$C_GRAY" "  DNS zone may have been configured manually."
+                    _print ""
+                fi
 
                 add_diagnosis "INFO" "Manual Lookup: No AMPLS found for IP $LOOKUP_AMPLS_IP" \
                     "Reverse lookup of $LOOKUP_AMPLS_IP did not find an AMPLS resource in accessible subscriptions" \
@@ -5800,8 +5906,9 @@ main() {
                 [[ "$cap_reset_time" == "null" ]] && cap_reset_time=""
                 [[ "$ws_access_resource_permissions" == "null" ]] && ws_access_resource_permissions=""
 
-                # Determine if LA cap is off
-                if [[ -z "$cap_quota_gb" || "$cap_quota_gb" == "-1" ]]; then
+                # Determine if LA cap is off (-1 or -1.0 from ARM = unlimited)
+                local cap_int="${cap_quota_gb%%.*}"
+                if [[ -z "$cap_quota_gb" || "$cap_int" == "-1" ]]; then
                     WS_CAP_OFF=true
                     WS_CAP_QUOTA_GB=""
                 else
@@ -5872,69 +5979,8 @@ main() {
                     fi
                 fi
 
-                # --- Known Issue #4: Log Analytics reached Daily Cap (OverQuota) ---
-                if [[ "$cap_status" == "OverQuota" ]]; then
-                    local reset_note=""
-                    # Parse reset time if available
-                    if [[ -n "$cap_reset_time" ]]; then
-                        # Handle /Date(epoch)/ format or ISO format
-                        local epoch_ms=""
-                        if [[ "$cap_reset_time" =~ /Date\(([0-9]+)\)/ ]]; then
-                            epoch_ms="${BASH_REMATCH[1]}"
-                        elif [[ "$cap_reset_time" =~ ^[0-9]+$ ]]; then
-                            epoch_ms="$cap_reset_time"
-                        fi
-                        if [[ -n "$epoch_ms" ]]; then
-                            local epoch_s=$(( epoch_ms / 1000 ))
-                            local now_s
-                            now_s="$(date +%s)"
-                            local diff_s=$(( epoch_s - now_s ))
-                            if (( diff_s > 0 )); then
-                                local hours=$(( diff_s / 3600 ))
-                                local mins=$(( (diff_s % 3600) / 60 ))
-                                local reset_utc
-                                reset_utc="$(date -u -d "@$epoch_s" '+%H:%M' 2>/dev/null || date -u -r "$epoch_s" '+%H:%M' 2>/dev/null || echo "")"
-                                reset_note=" (resets in ~${hours}h ${mins}m${reset_utc:+ at $reset_utc UTC})"
-                            else
-                                reset_note=" (reset time has passed, may take a few minutes to resume)"
-                            fi
-                        fi
-                    fi
-
-                    add_diagnosis "BLOCKING" "Log Analytics Daily Cap Reached (OverQuota)" \
-                        "Workspace over quota (${cap_quota_gb} GB cap) -- all ingestion stopped" \
-                        "The backend workspace ($WS_NAME) has reached its daily cap of ${cap_quota_gb} GB. All ingestion is stopped. The ingestion API still returns HTTP 200, but data is dropped at the LA layer.${reset_note}" \
-                        "Increase or remove the daily cap. The cap resets automatically at the configured reset hour (UTC)." \
-                        "Log Analytics > Usage and estimated costs > Daily Cap" \
-                        "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
-
-                    if $VERBOSE_OUTPUT; then
-                        _print ""
-                        _print -c "$C_RED" "  [!] DAILY CAP REACHED"
-                        _print ""
-                        _print -n -c "$C_GRAY" "  dataIngestionStatus: "
-                        _print -c "$C_RED" "OverQuota"
-                        _print -c "$C_GRAY" "  dailyQuotaGb:        ${cap_quota_gb} GB"
-                        _print ""
-                        _print -c "$C_CYAN" "  IMPACT:"
-                        _print -c "$C_GRAY" "    ALL data ingestion to this workspace is currently stopped."
-                        _print -c "$C_GRAY" "    This affects not just this App Insights resource, but any other"
-                        _print -c "$C_GRAY" "    data sources sending to the same workspace."
-                        _print ""
-                        _print -c "$C_GRAY" "    The App Insights ingestion API still returns HTTP 200 to SDKs,"
-                        _print -c "$C_GRAY" "    so your applications believe data is being accepted. It is NOT."
-                        _print ""
-                        _print -c "$C_CYAN" "  FIX:"
-                        _print -c "$C_GRAY" "    Azure Portal > Log Analytics workspace ($WS_NAME)"
-                        _print -c "$C_GRAY" "    > Settings > Usage and estimated costs > Daily Cap"
-                        _print -c "$C_GRAY" "    Increase the limit or remove the cap entirely."
-                        _print ""
-                        _print -c "$C_DARK_GRAY" "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
-                        _print ""
-                    fi
-                    write_progress_line "Backend LA Workspace" "FAIL" "$WS_NAME exists but OVER DAILY CAP${reset_note}"
-                    write_progress_line "Daily Cap" "FAIL" "OverQuota -- cap: ${cap_quota_gb}GB/day${reset_note}"
-                elif [[ "$cap_status" == "SubscriptionSuspended" ]]; then
+                # --- Extract daily cap data for the merged Daily Cap diagnostic ---
+                if [[ "$cap_status" == "SubscriptionSuspended" ]]; then
                     add_diagnosis "BLOCKING" "Azure Subscription Suspended" \
                         "Subscription suspended -- all ingestion blocked" \
                         "The subscription containing the Log Analytics workspace ($WS_NAME) is suspended. All data ingestion is blocked." \
@@ -5950,27 +5996,13 @@ main() {
                         _print -c "$C_GRAY" "  No data ingestion or queries will work until the subscription is reactivated."
                         _print ""
                     fi
-                    write_progress_line "Backend Workspace" "FAIL" "$WS_NAME exists but SUBSCRIPTION SUSPENDED"
-                    write_progress_line "Daily Cap" "FAIL" "SubscriptionSuspended"
+                    write_progress_line "Backend LA Workspace" "FAIL" "$WS_NAME exists but SUBSCRIPTION SUSPENDED"
                 else
-                    # RespectQuota or other normal status
-                    local cap_summary="under quota"
-                    [[ -n "$cap_quota_gb" && "$cap_quota_gb" != "-1" ]] && cap_summary="cap: ${cap_quota_gb} GB/day"
-
-                    if $VERBOSE_OUTPUT; then
-                        _print ""
-                        _print -c "$C_GRAY" "  Daily Cap Status:"
-                        _print -n -c "$C_GRAY" "    dataIngestionStatus: "
-                        _print -c "$C_GREEN" "$cap_status"
-                        [[ -n "$cap_quota_gb" && "$cap_quota_gb" != "-1" ]] && _print -c "$C_GRAY" "    dailyQuotaGb:        ${cap_quota_gb} GB"
-                        _print ""
-                    fi
                     if $ws_require_workspace_perms; then
-                        write_progress_line "Backend LA Workspace" "INFO" "$WS_NAME exists, $cap_summary, access mode = require workspace permissions"
+                        write_progress_line "Backend LA Workspace" "INFO" "$WS_NAME exists, access mode = require workspace permissions"
                     else
-                        write_progress_line "Backend LA Workspace" "OK" "$WS_NAME exists, $cap_summary"
+                        write_progress_line "Backend LA Workspace" "OK" "$WS_NAME exists"
                     fi
-                    write_progress_line "Daily Cap" "OK" "RespectQuota ($cap_summary)"
                 fi
 
             elif [[ "$ws_http_code" == "404" ]]; then
@@ -5988,7 +6020,7 @@ main() {
                     _print -c "$C_RED" "  [!] WORKSPACE NOT FOUND"
                     _print ""
                     _print -c "$C_GRAY" "  The Log Analytics workspace linked to this App Insights resource"
-                    _print -c "$C_GRAY" "  does not exist (ARM returned HTTP 404)."
+                    _print -c "$C_GRAY" "  does not exist in any accessible subscription."
                     _print ""
                     _print -c "$C_CYAN" "  IMPACT:"
                     _print -c "$C_GRAY" "    The App Insights ingestion API will return HTTP 200 to your SDKs,"
@@ -6006,7 +6038,8 @@ main() {
                     _print ""
                     _print -c "$C_GRAY" "    2. Link App Insights to a different (existing) workspace:"
                     _print -c "$C_GRAY" "       Azure Portal > App Insights > Properties > Change Workspace"
-                    _print -c "$C_GRAY" "    3. If recently deleted (< 14 days), recover it:"
+                    _print ""
+                    _print -c "$C_GRAY" "    3. If the workspace was recently deleted (< 14 days), recover it:"
                     _print -c "$C_DARK_GRAY" "       https://learn.microsoft.com/azure/azure-monitor/logs/delete-workspace#recover-a-workspace"
                     _print ""
                 fi
@@ -6018,7 +6051,7 @@ main() {
                     _print ""
                     _print -c "$C_YELLOW" "  [!] INSUFFICIENT PERMISSIONS"
                     _print ""
-                    _print -c "$C_GRAY" "  Could not query the backend Log Analytics workspace via ARM (HTTP $ws_http_code)."
+                    _print -c "$C_GRAY" "  Could not query the backend Log Analytics workspace (HTTP $ws_http_code)."
                     _print -c "$C_GRAY" "  Your account may not have Reader access to the subscription containing"
                     _print -c "$C_GRAY" "  the workspace, or the workspace is in a different tenant."
                     _print ""
@@ -6051,159 +6084,329 @@ main() {
         fi
 
         # ==============================================================
-        # Known Issue #5: AI Daily Cap vs LA Daily Cap Misconfigurations
+        # Known Issue #5: Daily Cap
         # ==============================================================
         if [[ -n "$WS_RESOURCE_ID" ]]; then
-            write_progress_start "Daily Cap Settings"
+            write_progress_start "Daily Cap"
             if $VERBOSE_OUTPUT; then
                 _print ""
                 _print -c "$C_DARK_GRAY" "  ========================================================================"
-                _print -c "$C_CYAN" "  KNOWN ISSUE CHECK: Daily Cap Settings (App Insights vs Log Analytics)"
+                _print -c "$C_CYAN" "  KNOWN ISSUE CHECK: Daily Cap"
                 _print -c "$C_DARK_GRAY" "  ========================================================================"
                 _print ""
-                _print -c "$C_GRAY" "  Comparing daily cap settings between App Insights and the backend"
-                _print -c "$C_GRAY" "  Log Analytics workspace to detect silent data drop scenarios..."
             fi
 
-            # Fetch AI daily cap from PricingPlans API
-            local ai_cap_response
-            _debug_az_rest "GET" "https://management.azure.com${ai_id}/PricingPlans/current?api-version=2017-10-01"
-            ai_cap_response="$(az rest --method GET --url "https://management.azure.com${ai_id}/PricingPlans/current?api-version=2017-10-01" 2>/dev/null | tr -d '\r')"
-
-            if [[ -n "$ai_cap_response" ]]; then
-                if $HAS_JQ; then
-                    AI_CAP_GB="$(echo "$ai_cap_response" | jq -r '.properties.cap // empty' 2>/dev/null)"
-                    [[ -z "$AI_CAP_GB" ]] && AI_CAP_GB="$(echo "$ai_cap_response" | jq -r '.properties.Cap // empty' 2>/dev/null)"
-                else
-                    # Use regex to extract cap value
-                    if [[ "$ai_cap_response" =~ \"cap\"[[:space:]]*:[[:space:]]*([0-9.]+) ]]; then
-                        AI_CAP_GB="${BASH_REMATCH[1]}"
-                    elif [[ "$ai_cap_response" =~ \"Cap\"[[:space:]]*:[[:space:]]*([0-9.]+) ]]; then
-                        AI_CAP_GB="${BASH_REMATCH[1]}"
+            # --- Check: LA OverQuota (daily cap reached at the workspace level) ---
+            if [[ "$cap_status" == "OverQuota" ]]; then
+                local reset_note=""
+                # Parse reset time if available
+                if [[ -n "$cap_reset_time" ]]; then
+                    local epoch_ms=""
+                    if [[ "$cap_reset_time" =~ /Date\(([0-9]+)\)/ ]]; then
+                        epoch_ms="${BASH_REMATCH[1]}"
+                    elif [[ "$cap_reset_time" =~ ^[0-9]+$ ]]; then
+                        epoch_ms="$cap_reset_time"
+                    fi
+                    if [[ -n "$epoch_ms" ]]; then
+                        local epoch_s=$(( epoch_ms / 1000 ))
+                        local now_s
+                        now_s="$(date +%s)"
+                        local diff_s=$(( epoch_s - now_s ))
+                        if (( diff_s > 0 )); then
+                            local hours=$(( diff_s / 3600 ))
+                            local mins=$(( (diff_s % 3600) / 60 ))
+                            local reset_utc
+                            reset_utc="$(date -u -d "@$epoch_s" '+%H:%M' 2>/dev/null || date -u -r "$epoch_s" '+%H:%M' 2>/dev/null || echo "")"
+                            reset_note=" (resets in ~${hours}h ${mins}m${reset_utc:+ at $reset_utc UTC})"
+                        else
+                            reset_note=" (reset time has passed, may take a few minutes to resume)"
+                        fi
                     fi
                 fi
-            fi
 
-            # Determine if AI cap is effectively off
-            if [[ -z "$AI_CAP_GB" ]]; then
-                AI_CAP_OFF=true
+                add_diagnosis "BLOCKING" "Log Analytics Daily Cap Reached (OverQuota)" \
+                    "Workspace over quota (${cap_quota_gb} GB cap) -- all ingestion stopped" \
+                    "The backend workspace ($WS_NAME) has reached its daily cap of ${cap_quota_gb} GB. All ingestion is stopped. The ingestion API still returns HTTP 200, but data is dropped at the LA layer.${reset_note}" \
+                    "Increase or remove the daily cap. The cap resets automatically at the configured reset hour (UTC)." \
+                    "Log Analytics > Usage and estimated costs > Daily Cap" \
+                    "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+
+                if $VERBOSE_OUTPUT; then
+                    _print -c "$C_RED" "  [!] DAILY CAP REACHED"
+                    _print ""
+                    _print -n -c "$C_GRAY" "  dataIngestionStatus: "
+                    _print -c "$C_RED" "OverQuota"
+                    _print -c "$C_GRAY" "  dailyQuotaGb:        ${cap_quota_gb} GB"
+                    if [[ -n "$epoch_s" ]]; then
+                        local reset_utc_full
+                        reset_utc_full="$(date -u -d "@$epoch_s" '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -r "$epoch_s" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")"
+                        if [[ -n "$reset_utc_full" ]]; then
+                            _print -c "$C_GRAY" "  quotaNextResetTime:  ${reset_utc_full} UTC${reset_note}"
+                        fi
+                    fi
+                    _print ""
+                    _print -c "$C_CYAN" "  IMPACT:"
+                    _print -c "$C_GRAY" "    ALL data ingestion to this workspace is currently stopped."
+                    _print -c "$C_GRAY" "    This affects not just this App Insights resource, but any other"
+                    _print -c "$C_GRAY" "    data sources sending to the same workspace (other AI resources,"
+                    _print -c "$C_GRAY" "    AMA agents, Sentinel, etc.)."
+                    _print ""
+                    _print -c "$C_GRAY" "    The App Insights ingestion API still returns HTTP 200 to SDKs,"
+                    _print -c "$C_GRAY" "    so your applications believe data is being accepted. It is NOT."
+                    _print ""
+                    _print -c "$C_CYAN" "  FIX:"
+                    _print -c "$C_GRAY" "    Azure Portal > Log Analytics workspace ($WS_NAME)"
+                    _print -c "$C_GRAY" "    > Settings > Usage and estimated costs > Daily Cap"
+                    _print -c "$C_GRAY" "    Increase the limit or remove the cap entirely."
+                    _print ""
+                    _print -c "$C_DARK_GRAY" "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    _print ""
+                fi
+                write_progress_line "Daily Cap" "FAIL" "OverQuota -- cap: ${cap_quota_gb}GB/day${reset_note}"
+            elif [[ "$cap_status" == "SubscriptionSuspended" ]]; then
+                # Already flagged as BLOCKING in Backend LA Workspace -- just note here
+                write_progress_line "Daily Cap" "FAIL" "SubscriptionSuspended"
             else
-                # Cap >= 9999 means effectively unlimited
-                local ai_cap_int="${AI_CAP_GB%%.*}"
-                if [[ -n "$ai_cap_int" ]] && (( ai_cap_int >= 9999 )); then
+                # --- Fetch AI daily cap from PricingPlans API ---
+                if $VERBOSE_OUTPUT; then
+                    _print -c "$C_GRAY" "  Comparing daily cap settings between App Insights and the backend"
+                    _print -c "$C_GRAY" "  Log Analytics workspace to detect silent data drop scenarios..."
+                fi
+
+                local ai_cap_response
+                _debug_az_rest "GET" "https://management.azure.com${ai_id}/PricingPlans/current?api-version=2017-10-01"
+                ai_cap_response="$(az rest --method GET --url "https://management.azure.com${ai_id}/PricingPlans/current?api-version=2017-10-01" 2>/dev/null | tr -d '\r')"
+
+                if [[ -n "$ai_cap_response" ]]; then
+                    if $HAS_JQ; then
+                        AI_CAP_GB="$(echo "$ai_cap_response" | jq -r '.properties.cap // empty' 2>/dev/null)"
+                        [[ -z "$AI_CAP_GB" ]] && AI_CAP_GB="$(echo "$ai_cap_response" | jq -r '.properties.Cap // empty' 2>/dev/null)"
+                    else
+                        # Use regex to extract cap value
+                        if [[ "$ai_cap_response" =~ \"cap\"[[:space:]]*:[[:space:]]*([0-9.]+) ]]; then
+                            AI_CAP_GB="${BASH_REMATCH[1]}"
+                        elif [[ "$ai_cap_response" =~ \"Cap\"[[:space:]]*:[[:space:]]*([0-9.]+) ]]; then
+                            AI_CAP_GB="${BASH_REMATCH[1]}"
+                        fi
+                    fi
+                fi
+
+                # Determine if AI cap is effectively off
+                if [[ -z "$AI_CAP_GB" ]]; then
                     AI_CAP_OFF=true
-                fi
-            fi
-
-            # --- Comparison Logic ---
-            local ai_cap_display la_cap_display
-            if $AI_CAP_OFF; then
-                ai_cap_display="OFF (no limit)"
-            else
-                ai_cap_display="${AI_CAP_GB} GB/day"
-            fi
-            if $WS_CAP_OFF; then
-                la_cap_display="OFF (no limit)"
-            else
-                la_cap_display="${WS_CAP_QUOTA_GB} GB/day"
-            fi
-
-            if $VERBOSE_OUTPUT; then
-                _print ""
-                _print -c "$C_WHITE" "  App Insights daily cap:    $ai_cap_display"
-                _print -c "$C_WHITE" "  Log Analytics daily cap:   $la_cap_display"
-                _print ""
-            fi
-
-            if ! $WS_CAP_OFF && ! $AI_CAP_OFF; then
-                # Both have caps -- compare them
-                local la_lt_ai=false
-                if $HAS_BC; then
-                    (( $(echo "$WS_CAP_QUOTA_GB < $AI_CAP_GB" | bc -l 2>/dev/null) )) && la_lt_ai=true
                 else
-                    local la_int="${WS_CAP_QUOTA_GB%%.*}"
-                    local ai_int="${AI_CAP_GB%%.*}"
-                    [[ -n "$la_int" && -n "$ai_int" ]] && (( la_int < ai_int )) && la_lt_ai=true
+                    # Cap >= 9999 means effectively unlimited
+                    local ai_cap_int="${AI_CAP_GB%%.*}"
+                    if [[ -n "$ai_cap_int" ]] && (( ai_cap_int >= 9999 )); then
+                        AI_CAP_OFF=true
+                    fi
                 fi
 
-                if $la_lt_ai; then
-                    # THE KEY SCENARIO: LA cap < AI cap = silent data drop
-                    add_diagnosis "WARNING" "Daily Cap Mismatch: LA Cap (${WS_CAP_QUOTA_GB} GB) < AI Cap (${AI_CAP_GB} GB)" \
-                        "Daily cap mismatch: LA ${WS_CAP_QUOTA_GB} GB < AI ${AI_CAP_GB} GB (silent data drop risk)" \
-                        "LA workspace hits cap first, silently drops data while SDKs get HTTP 200." \
-                        "Align caps: increase LA to >= ${AI_CAP_GB} GB, or decrease AI to <= ${WS_CAP_QUOTA_GB} GB." \
-                        "Log Analytics > Usage and estimated costs > Daily Cap" \
+                # --- Comparison Logic ---
+                local ai_cap_display la_cap_display
+                if $AI_CAP_OFF; then
+                    ai_cap_display="OFF (no limit)"
+                else
+                    ai_cap_display="${AI_CAP_GB} GB/day"
+                fi
+                if $WS_CAP_OFF; then
+                    la_cap_display="OFF (no limit)"
+                else
+                    la_cap_display="${WS_CAP_QUOTA_GB} GB/day"
+                fi
+
+                if $VERBOSE_OUTPUT; then
+                    _print ""
+                    _print -c "$C_WHITE" "  App Insights daily cap:    $ai_cap_display"
+                    _print -c "$C_WHITE" "  Log Analytics daily cap:   $la_cap_display"
+                    _print ""
+                fi
+
+                if ! $WS_CAP_OFF && ! $AI_CAP_OFF; then
+                    # Both have caps -- compare them
+                    local la_lt_ai=false
+                    if $HAS_BC; then
+                        (( $(echo "$WS_CAP_QUOTA_GB < $AI_CAP_GB" | bc -l 2>/dev/null) )) && la_lt_ai=true
+                    else
+                        local la_int="${WS_CAP_QUOTA_GB%%.*}"
+                        local ai_int="${AI_CAP_GB%%.*}"
+                        [[ -n "$la_int" && -n "$ai_int" ]] && (( la_int < ai_int )) && la_lt_ai=true
+                    fi
+
+                    if $la_lt_ai; then
+                        # LA cap < AI cap = silent data drop risk
+                        add_diagnosis "WARNING" "Daily Cap Mismatch: LA Cap (${WS_CAP_QUOTA_GB} GB) < AI Cap (${AI_CAP_GB} GB)" \
+                            "Daily cap mismatch: LA ${WS_CAP_QUOTA_GB} GB < AI ${AI_CAP_GB} GB (silent data drop risk)" \
+                            "LA workspace hits cap first, silently drops data while SDKs get HTTP 200. Data appears to send successfully but never appears in queries." \
+                            "Align caps: increase LA to >= ${AI_CAP_GB} GB, or decrease AI to <= ${WS_CAP_QUOTA_GB} GB." \
+                            "Log Analytics > Usage and estimated costs > Daily Cap" \
+                            "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+
+                        if $VERBOSE_OUTPUT; then
+                            _print -c "$C_RED" "  [!] DAILY CAP MISCONFIGURATION DETECTED"
+                            _print ""
+                            _print -c "$C_CYAN" "  WHAT HAPPENS:"
+                            _print -c "$C_GRAY" "    1. Your SDK sends telemetry to App Insights ingestion API"
+                            _print -c "$C_GRAY" "    2. App Insights returns HTTP 200 (accepted) -- AI cap not yet reached"
+                            _print -c "$C_GRAY" "    3. Data enters the pipeline toward Log Analytics workspace"
+                            _print -c "$C_GRAY" "    4. LA workspace has already hit its ${WS_CAP_QUOTA_GB} GB daily cap"
+                            _print -c "$C_GRAY" "    5. Data is SILENTLY DROPPED -- no error is returned to the SDK"
+                            _print ""
+                            _print -c "$C_CYAN" "  SCENARIO:"
+                            _print -c "$C_GRAY" "    When daily ingestion is between ${WS_CAP_QUOTA_GB} GB and ${AI_CAP_GB} GB,"
+                            _print -c "$C_GRAY" "    the LA workspace stops accepting data while App Insights keeps"
+                            _print -c "$C_GRAY" "    telling your SDKs everything is fine."
+                            _print ""
+                            _print -c "$C_CYAN" "  FIX:"
+                            _print -c "$C_GRAY" "    Option 1: Increase LA daily cap to >= ${AI_CAP_GB} GB"
+                            _print -c "$C_GRAY" "      Log Analytics > Usage and estimated costs > Daily Cap"
+                            _print -c "$C_GRAY" "    Option 2: Decrease AI daily cap to <= ${WS_CAP_QUOTA_GB} GB"
+                            _print -c "$C_GRAY" "      App Insights > Usage and estimated costs > Daily Cap"
+                            _print -c "$C_GRAY" "    Option 3: Remove both caps (set to unlimited) and use"
+                            _print -c "$C_GRAY" "      Azure Cost Management alerts for budget control instead."
+                            _print ""
+                            _print -c "$C_DARK_GRAY" "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                            _print ""
+                        fi
+                        write_progress_line "Daily Cap" "WARN" "LA cap (${WS_CAP_QUOTA_GB} GB) < AI cap (${AI_CAP_GB} GB) -- silent data drop risk"
+                    else
+                        # Both have caps, LA >= AI -- properly aligned
+                        # Check for low caps before printing status
+                        local aligned_status="OK"
+                        local ai_low=false
+                        local la_low=false
+                        if ! $AI_CAP_OFF && [[ -n "$AI_CAP_GB" ]]; then
+                            if $HAS_BC; then
+                                (( $(echo "$AI_CAP_GB < 0.5" | bc -l 2>/dev/null) )) && ai_low=true
+                            else
+                                local ai_int_chk="${AI_CAP_GB%%.*}"
+                                [[ "$ai_int_chk" == "0" ]] && ai_low=true
+                            fi
+                        fi
+                        if ! $WS_CAP_OFF && [[ -n "$WS_CAP_QUOTA_GB" ]]; then
+                            if $HAS_BC; then
+                                (( $(echo "$WS_CAP_QUOTA_GB < 0.5" | bc -l 2>/dev/null) )) && la_low=true
+                            else
+                                local la_int_chk="${WS_CAP_QUOTA_GB%%.*}"
+                                [[ "$la_int_chk" == "0" ]] && la_low=true
+                            fi
+                        fi
+
+                        if $ai_low || $la_low; then
+                            # Low cap advisory replaces the green "aligned" message
+                            if $ai_low; then
+                                aligned_status="INFO"
+                                if $VERBOSE_OUTPUT; then
+                                    _print -c "$C_YELLOW" "  [i] AI daily cap is very low (${AI_CAP_GB} GB/day)."
+                                    _print -c "$C_GRAY" "  If telemetry volume exceeds this, the ingestion API will return"
+                                    _print -c "$C_GRAY" "  HTTP 439 and reject all data until the cap resets."
+                                    _print ""
+                                fi
+                                add_diagnosis "INFO" "AI Daily Cap Very Low (${AI_CAP_GB} GB/day)" \
+                                    "AI daily cap is very low (${AI_CAP_GB} GB/day) -- may cause HTTP 439 rejections" \
+                                    "The App Insights daily cap is set to ${AI_CAP_GB} GB/day. If telemetry volume exceeds this threshold, the ingestion API will return HTTP 439 and reject all further data until the cap resets at the configured reset hour (UTC)." \
+                                    "Review whether this cap is intentional. If not, increase it at App Insights > Usage and estimated costs > Daily Cap." \
+                                    "App Insights > Usage and estimated costs > Daily Cap" \
+                                    "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                            fi
+                            if $la_low; then
+                                aligned_status="INFO"
+                                if $VERBOSE_OUTPUT; then
+                                    _print -c "$C_YELLOW" "  [i] LA daily cap is very low (${WS_CAP_QUOTA_GB} GB/day)."
+                                    _print -c "$C_GRAY" "  Other data sources sharing this workspace (AMA agents, Sentinel,"
+                                    _print -c "$C_GRAY" "  Diagnostic Settings) may consume the cap before App Insights data arrives."
+                                    _print ""
+                                fi
+                                add_diagnosis "INFO" "LA Daily Cap Very Low (${WS_CAP_QUOTA_GB} GB/day)" \
+                                    "LA daily cap is very low (${WS_CAP_QUOTA_GB} GB/day) -- shared cap may starve App Insights" \
+                                    "The Log Analytics workspace daily cap is set to ${WS_CAP_QUOTA_GB} GB/day. Other data sources sharing this workspace (AMA agents, Sentinel, Diagnostic Settings) may consume the cap before App Insights telemetry arrives, causing silent data drops." \
+                                    "Review whether this cap is intentional. If not, increase it at Log Analytics > Usage and estimated costs > Daily Cap." \
+                                    "Log Analytics > Usage and estimated costs > Daily Cap" \
+                                    "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                            fi
+                        else
+                            if $VERBOSE_OUTPUT; then
+                                _print -c "$C_GREEN" "  Daily caps are properly aligned (LA cap >= AI cap)."
+                                _print -c "$C_GRAY" "  The App Insights cap will trigger first, giving SDKs"
+                                _print -c "$C_GRAY" "  visibility into throttling before the LA cap is reached."
+                                _print ""
+                            fi
+                        fi
+                        write_progress_line "Daily Cap" "$aligned_status" "Aligned -- AI cap ${AI_CAP_GB} GB, LA cap ${WS_CAP_QUOTA_GB} GB"
+                    fi
+                elif ! $WS_CAP_OFF && $AI_CAP_OFF; then
+                    # AI cap off but LA has a cap -- same silent data drop risk as AI > LA
+                    add_diagnosis "WARNING" "Silent Data Drop Risk: AI Cap OFF, LA Cap ${WS_CAP_QUOTA_GB} GB" \
+                        "AI cap OFF but LA cap ${WS_CAP_QUOTA_GB} GB -- silent data drop risk" \
+                        "App Insights daily cap is OFF (unlimited), but the LA workspace has a ${WS_CAP_QUOTA_GB} GB cap. When ingestion approaches ${WS_CAP_QUOTA_GB} GB/day, data will be silently dropped at the LA layer while App Insights continues to accept it (HTTP 200). This is the same silent data drop risk as when AI cap > LA cap." \
+                        "Set the AI daily cap to <= ${WS_CAP_QUOTA_GB} GB so the ingestion API rejects data (HTTP 439) before the LA cap is hit, giving your SDKs visibility into the throttling." \
+                        "App Insights > Usage and estimated costs > Daily Cap" \
                         "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
 
                     if $VERBOSE_OUTPUT; then
-                        _print -c "$C_RED" "  [!] DAILY CAP MISCONFIGURATION DETECTED"
+                        _print -c "$C_YELLOW" "  [!] SILENT DATA DROP RISK"
                         _print ""
-                        _print -c "$C_CYAN" "  WHAT HAPPENS:"
-                        _print -c "$C_GRAY" "    1. Your SDK sends telemetry to App Insights ingestion API"
-                        _print -c "$C_GRAY" "    2. App Insights returns HTTP 200 (accepted) -- AI cap not yet reached"
-                        _print -c "$C_GRAY" "    3. Data enters the pipeline toward Log Analytics workspace"
-                        _print -c "$C_GRAY" "    4. LA workspace has already hit its ${WS_CAP_QUOTA_GB} GB daily cap"
-                        _print -c "$C_GRAY" "    5. Data is SILENTLY DROPPED -- no error is returned to the SDK"
-                        _print ""
-                        _print -c "$C_CYAN" "  SCENARIO:"
-                        _print -c "$C_GRAY" "    When daily ingestion is between ${WS_CAP_QUOTA_GB} GB and ${AI_CAP_GB} GB,"
-                        _print -c "$C_GRAY" "    the LA workspace stops accepting data while App Insights keeps"
-                        _print -c "$C_GRAY" "    telling your SDKs everything is fine."
+                        _print -c "$C_GRAY" "  App Insights has no daily cap (unlimited), but the backend LA"
+                        _print -c "$C_GRAY" "  workspace limits ingestion to ${WS_CAP_QUOTA_GB} GB/day. When ingestion"
+                        _print -c "$C_GRAY" "  approaches ${WS_CAP_QUOTA_GB} GB, data will be silently dropped at the LA"
+                        _print -c "$C_GRAY" "  layer while App Insights continues to accept it (HTTP 200)."
                         _print ""
                         _print -c "$C_CYAN" "  FIX:"
-                        _print -c "$C_GRAY" "    Option 1: Increase LA daily cap to >= ${AI_CAP_GB} GB"
-                        _print -c "$C_GRAY" "    Option 2: Decrease AI daily cap to <= ${WS_CAP_QUOTA_GB} GB"
-                        _print -c "$C_GRAY" "    Option 3: Remove both caps and use Azure Cost Management alerts"
+                        _print -c "$C_GRAY" "    Set the AI daily cap to <= ${WS_CAP_QUOTA_GB} GB so the ingestion API"
+                        _print -c "$C_GRAY" "    rejects data (HTTP 439) before the LA cap is hit."
+                        _print -c "$C_GRAY" "      App Insights > Usage and estimated costs > Daily Cap"
                         _print ""
                         _print -c "$C_DARK_GRAY" "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
                         _print ""
                     fi
-                    write_progress_line "Daily Cap Settings" "WARN" "LA cap (${WS_CAP_QUOTA_GB} GB) < AI cap (${AI_CAP_GB} GB) -- silent data drop risk"
-                else
-                    # Both have caps, LA >= AI -- properly aligned
+                    write_progress_line "Daily Cap" "WARN" "AI cap OFF, LA cap ${WS_CAP_QUOTA_GB} GB/day -- silent data drop risk"
+                elif $WS_CAP_OFF && $AI_CAP_OFF; then
+                    # Both off -- no caps
                     if $VERBOSE_OUTPUT; then
-                        _print -c "$C_GREEN" "  Daily caps are properly aligned (LA cap >= AI cap)."
-                        _print -c "$C_GRAY" "  The App Insights cap will trigger first, giving SDKs"
-                        _print -c "$C_GRAY" "  visibility into throttling before the LA cap is reached."
+                        _print -c "$C_GREEN" "  Both daily caps are off. No daily ingestion limit is enforced."
+                        _print -c "$C_GRAY" "  Consider using Azure Cost Management alerts for budget control."
                         _print ""
                     fi
-                    write_progress_line "Daily Cap Settings" "OK" "Aligned -- AI cap ${AI_CAP_GB} GB, LA cap ${WS_CAP_QUOTA_GB} GB"
-                fi
-            elif ! $WS_CAP_OFF && $AI_CAP_OFF; then
-                # AI cap off but LA has a cap -- LA is the effective limit
-                add_diagnosis "INFO" "Log Analytics Daily Cap is the Effective Limit (${WS_CAP_QUOTA_GB} GB)" \
-                    "LA cap (${WS_CAP_QUOTA_GB} GB) is the effective limit (AI cap is off)" \
-                    "App Insights daily cap is OFF, but the LA workspace has a ${WS_CAP_QUOTA_GB} GB cap. Data will be silently dropped at the LA layer if you approach this limit." \
-                    "Consider setting the AI daily cap to ${WS_CAP_QUOTA_GB} GB so the ingestion API stops accepting data before the LA cap is hit." \
-                    "App Insights > Usage and estimated costs > Daily Cap" \
-                    "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    write_progress_line "Daily Cap" "OK" "Both caps OFF (no daily limit)"
+                else
+                    # AI has cap, LA unlimited -- fine
+                    # Check if AI cap is very low before printing status
+                    local ai_low2=false
+                    local unlimited_status="OK"
+                    if ! $AI_CAP_OFF && [[ -n "$AI_CAP_GB" ]]; then
+                        if $HAS_BC; then
+                            (( $(echo "$AI_CAP_GB < 0.5" | bc -l 2>/dev/null) )) && ai_low2=true
+                        else
+                            local ai_int_chk2="${AI_CAP_GB%%.*}"
+                            [[ "$ai_int_chk2" == "0" ]] && ai_low2=true
+                        fi
+                    fi
 
-                if $VERBOSE_OUTPUT; then
-                    _print -c "$C_YELLOW" "  [!] LOG ANALYTICS CAP IS THE EFFECTIVE LIMIT"
-                    _print ""
-                    _print -c "$C_GRAY" "  App Insights has no daily cap, but the backend LA workspace"
-                    _print -c "$C_GRAY" "  limits ingestion to ${WS_CAP_QUOTA_GB} GB/day. Consider also setting"
-                    _print -c "$C_GRAY" "  the AI daily cap so the ingestion API rejects data before"
-                    _print -c "$C_GRAY" "  the LA cap is hit."
-                    _print ""
+                    if $ai_low2; then
+                        unlimited_status="INFO"
+                        if $VERBOSE_OUTPUT; then
+                            _print -c "$C_YELLOW" "  [i] AI daily cap is very low (${AI_CAP_GB} GB/day)."
+                            _print -c "$C_GRAY" "  If telemetry volume exceeds this, the ingestion API will return"
+                            _print -c "$C_GRAY" "  HTTP 439 and reject all data until the cap resets."
+                            _print ""
+                        fi
+                        add_diagnosis "INFO" "AI Daily Cap Very Low (${AI_CAP_GB} GB/day)" \
+                            "AI daily cap is very low (${AI_CAP_GB} GB/day) -- may cause HTTP 439 rejections" \
+                            "The App Insights daily cap is set to ${AI_CAP_GB} GB/day. If telemetry volume exceeds this threshold, the ingestion API will return HTTP 439 and reject all further data until the cap resets at the configured reset hour (UTC)." \
+                            "Review whether this cap is intentional. If not, increase it at App Insights > Usage and estimated costs > Daily Cap." \
+                            "App Insights > Usage and estimated costs > Daily Cap" \
+                            "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    else
+                        if $VERBOSE_OUTPUT; then
+                            _print -c "$C_GREEN" "  AI daily cap limits ingestion to ${AI_CAP_GB} GB/day."
+                        fi
+                    fi
+                    if $VERBOSE_OUTPUT; then
+                        _print -c "$C_GRAY" "  LA workspace has no daily cap -- no silent drops risk."
+                        _print ""
+                    fi
+                    write_progress_line "Daily Cap" "$unlimited_status" "AI cap ${AI_CAP_GB} GB/day, LA unlimited"
                 fi
-                write_progress_line "Daily Cap Settings" "INFO" "AI cap OFF, LA cap ${WS_CAP_QUOTA_GB} GB/day -- LA is effective limit"
-            elif $WS_CAP_OFF && $AI_CAP_OFF; then
-                # Both off -- no caps
-                if $VERBOSE_OUTPUT; then
-                    _print -c "$C_GREEN" "  Both daily caps are off. No daily ingestion limit is enforced."
-                    _print -c "$C_GRAY" "  Consider using Azure Cost Management alerts for budget control."
-                    _print ""
-                fi
-                write_progress_line "Daily Cap Settings" "OK" "Both caps OFF (no daily limit)"
-            else
-                # AI has cap, LA unlimited -- fine
-                if $VERBOSE_OUTPUT; then
-                    _print -c "$C_GREEN" "  AI daily cap limits ingestion to ${AI_CAP_GB} GB/day."
-                    _print -c "$C_GRAY" "  LA workspace has no daily cap -- no silent drops risk."
-                    _print ""
-                fi
-                write_progress_line "Daily Cap Settings" "OK" "AI cap ${AI_CAP_GB} GB/day, LA unlimited"
             fi
         fi
 
@@ -6807,15 +7010,9 @@ main() {
                     _print ""
                 fi
 
-                # KQL verification query (network-only: E2E won't run, give manual query)
+                # KQL verification reason (network-only: E2E won't run, store for diagnosis summary)
                 if $NETWORK_ONLY; then
-                    _print ""
-                    _print -c "$C_CYAN" "  MANUAL VERIFICATION QUERY:"
-                    _print -c "$C_DARK_GRAY" "  The ingestion API accepted the test record (HTTP 200), but --network-only skips"
-                    _print -c "$C_DARK_GRAY" "  automated verification. Run the following query in App Insights > Logs to confirm arrival:"
-                    _print ""
-                    _print -c "$C_WHITE" "  availabilityResults | where customDimensions.diagnosticRunId == '$INGEST_RESULT_TEST_RECORD_ID'"
-                    _print ""
+                    MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200), but --network-only skips automated verification. Run the following query in App Insights > Logs to confirm arrival:"
                 fi
 
                 # High latency note
@@ -6857,7 +7054,11 @@ main() {
                             ing_fail_portal="App Insights > Network Isolation > 'Enabled from all networks'"
                             ing_fail_docs="https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
                             ;;
-                        429|439)
+                        429)
+                            ing_fail_portal=""
+                            ing_fail_docs="https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/investigate-rate-throttling"
+                            ;;
+                        439)
                             ing_fail_portal="App Insights > Usage and estimated costs > Daily Cap"
                             ing_fail_docs="https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
                             ;;
@@ -6910,10 +7111,10 @@ main() {
                 _print ""
                 _print -c "$C_DARK_GRAY" "  [i] Application ID not found -- skipping end-to-end verification."
                 _print -c "$C_DARK_GRAY" "      The AppId was not in the connection string or resource properties."
-                _print -c "$C_DARK_GRAY" "      Use the KQL above to verify manually in App Insights > Logs."
                 _print ""
             fi
-            write_progress_line "End-to-End Verification" "SKIP" "No Application ID available"
+            write_progress_line "End-to-End Verification" "SKIP" "No Application ID available (see verification KQL in Diagnosis Summary)"
+            MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200) but the Application ID needed for automated verification was not available. Run the following query in App Insights > Logs:"
         else
             # Acquire data plane token
             local data_plane_token
@@ -6925,10 +7126,10 @@ main() {
                     _print ""
                     _print -c "$C_DARK_GRAY" "  [i] Could not acquire data plane API token -- skipping end-to-end verification."
                     _print -c "$C_DARK_GRAY" "      Your account may not have Reader access, or the token endpoint is unreachable."
-                    _print -c "$C_DARK_GRAY" "      Use the KQL above to verify manually in App Insights > Logs."
                     _print ""
                 fi
-                write_progress_line "End-to-End Verification" "SKIP" "No data plane token (verify manually with KQL above)"
+                write_progress_line "End-to-End Verification" "SKIP" "No data plane token (see verification KQL in Diagnosis Summary)"
+                MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200) but a data plane token could not be acquired for automated verification. Run the following query in App Insights > Logs:"
             else
                 # Token acquired -- proceed with E2E verification
                 if $VERBOSE_OUTPUT; then
@@ -7066,9 +7267,10 @@ main() {
                         _print ""
                         _print -c "$C_GRAY" "  The test record was accepted by the ingestion API but hasn't appeared in"
                         _print -c "$C_GRAY" "  query results yet. This is not necessarily an error -- pipeline processing"
-                        _print -c "$C_GRAY" "  can take a few minutes under normal conditions. Use the KQL above to check later."
+                        _print -c "$C_GRAY" "  can take a few minutes under normal conditions."
                         _print ""
                     fi
+                    MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200) but it hasn't appeared in query results yet. Run the following query in App Insights > Logs after a few minutes:"
 
                 elif [[ "$E2E_STATUS" == "ERROR" ]]; then
                     local is_auth_error=false
@@ -7078,11 +7280,7 @@ main() {
                     $is_auth_error && error_summary="Auth failed"
 
                     $VERBOSE_OUTPUT && _print ""
-                    write_progress_line "End-to-End Verification" "INFO" "$error_summary -- verify manually with KQL above"
-                    if $VERBOSE_OUTPUT; then
-                        _print ""
-                        _print -c "$C_YELLOW" "  Error: $E2E_ERROR"
-                    fi
+                    write_progress_line "End-to-End Verification" "INFO" "$error_summary -- see verification KQL in Diagnosis Summary"
 
                     if $is_auth_error && $VERBOSE_OUTPUT; then
                         _print ""
@@ -7095,8 +7293,10 @@ main() {
                         _print -c "$C_GRAY" "       queries must come from within the AMPLS/private link scope"
                         _print ""
                     elif $VERBOSE_OUTPUT; then
-                        _print -c "$C_GRAY" "  This does not mean ingestion failed -- use the KQL above to verify manually."
+                        _print ""
+                        _print -c "$C_GRAY" "  This does not mean ingestion failed yet -- the ingestion API accepted the record (HTTP 200) -- see the verification KQL in Diagnosis Summary."
                     fi
+                    MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200) but automated verification encountered an error. Run the following query in App Insights > Logs to confirm arrival:"
                     $VERBOSE_OUTPUT && _print ""
                 fi
             fi
@@ -7111,9 +7311,10 @@ main() {
     elif ! $CHECK_AZURE && ! $NETWORK_ONLY && [[ "$INGEST_RESULT_STATUS" == "PASS" ]]; then
         # No Azure login -- can't do automated E2E verification.
         # Show manual verification guidance with KQL query.
-        write_progress_line "End-to-End Verification" "SKIP" "Azure login not available (verify manually with KQL below)"
+        write_progress_line "End-to-End Verification" "SKIP" "Azure login not available (see verification KQL in Diagnosis Summary)"
 
         local verify_kql="availabilityResults | where customDimensions.diagnosticRunId == '$INGEST_RESULT_TEST_RECORD_ID'"
+        MANUAL_VERIFY_REASON="The ingestion API accepted the test record (HTTP 200) but automated verification is not available without an Azure login. Open Azure Portal > App Insights > Logs and run this query to confirm the record arrived:"
 
         if $VERBOSE_OUTPUT; then
             _print ""
@@ -7123,7 +7324,7 @@ main() {
             _print ""
             _print -c "$C_GRAY" "  Automated end-to-end verification requires an Azure login (az CLI)."
             _print -c "$C_GRAY" "  The ingestion API accepted the test record (HTTP 200). To confirm it arrived"
-            _print -c "$C_GRAY" "  in your App Insights resource, run the KQL query below manually."
+            _print -c "$C_GRAY" "  in your App Insights resource, see the verification KQL in the Diagnosis Summary below."
             _print ""
             _print -c "$C_GRAY" "  If telemetry from your application is still missing, focus on:"
             _print -c "$C_GRAY" "    1. SDK/Agent configuration and initialization issues"
@@ -7138,15 +7339,6 @@ main() {
             _print -c "$C_DARK_GRAY" "  -------------------------------------------------------------------------"
             _print ""
         fi
-
-        _print ""
-        _print -c "$C_CYAN" "  MANUAL VERIFICATION QUERY:"
-        _print -c "$C_DARK_GRAY" "  The ingestion API accepted the test record (HTTP 200) but automated verification"
-        _print -c "$C_DARK_GRAY" "  is not available without an Azure login. Open Azure Portal > App Insights > Logs"
-        _print -c "$C_DARK_GRAY" "  and run this query to confirm the record arrived:"
-        _print ""
-        _print -c "$C_WHITE" "  $verify_kql"
-        _print ""
     fi
 
     # Safety net: if a progress start is still pending (shouldn't happen, but defensive),
@@ -7160,6 +7352,17 @@ main() {
     # DIAGNOSIS SUMMARY
     # ================================================================
     render_diagnosis_summary
+
+    # --- Manual Verification KQL (shown when E2E auto-verify couldn't run) ---
+    if [[ -n "$MANUAL_VERIFY_REASON" && -n "$INGEST_RESULT_TEST_RECORD_ID" ]]; then
+        local verify_kql_final="availabilityResults | where customDimensions.diagnosticRunId == '$INGEST_RESULT_TEST_RECORD_ID'"
+        _print ""
+        _print -c "$C_CYAN" "  MANUAL VERIFICATION QUERY:"
+        _print -c "$C_DARK_GRAY" "  $MANUAL_VERIFY_REASON"
+        _print ""
+        _print -c "$C_WHITE" "  $verify_kql_final"
+        _print ""
+    fi
 
     # ---- Footer ----
     _print ""

@@ -1,6 +1,36 @@
-# appinsights-telemetry-flow
+# Application Insights Telemetry Flow Troubleshooters
 
 Self-service diagnostic scripts for Azure Application Insights. Validate connectivity, TLS, AMPLS/Private Link, ingestion, sampling, workspace health, and agent installation — directly from the machine where your app runs. Available for PowerShell (Windows) and Bash (Linux).
+
+> **Quick start — download & run from any machine with outbound internet access:**
+>
+> **PowerShell**
+> ```powershell
+> Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
+> .\Test-AppInsightsTelemetryFlow.ps1 -ConnectionString "InstrumentationKey=..."
+> 
+> ```
+>
+> **Alt PowerShell Gallery (requires NuGet provider):** 
+>  ```powershell
+> Save-Script -Name Test-AppInsightsTelemetryFlow -Path .
+> .\Test-AppInsightsTelemetryFlow.ps1 -ConnectionString "InstrumentationKey=..."
+> 
+> ```
+>
+> **Manual copy (App Service, Functions, Kudu, restricted environments):** 
+>
+> If `Invoke-WebRequest` or `Save-Script` don't work (common in Kudu consoles), download the `.ps1` or `.sh` file from the [`/powershell`](powershell/) or [`/bash`](bash/) folder to your local machine, then **drag and drop** it into the Kudu file browser or upload it to the target machine. See [Running the Script — App Service (Windows)](docs/running-the-script.md#azure-app-service-windows) for step-by-step instructions.
+>
+> **Bash**
+> ```bash
+> curl -sLO "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/bash/test-appinsights-telemetry-flow.sh"
+> chmod +x test-appinsights-telemetry-flow.sh
+> ./test-appinsights-telemetry-flow.sh --connection-string "InstrumentationKey=..."
+> 
+> ```
+>
+> For best results, also run from a **developer workstation** or **VM** where you can `Connect-AzAccount` / `az login` — this enables Azure resource checks in addition to network testsd power.
 
 ## Telemetry Flow Overview
 
@@ -72,12 +102,16 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-
 .\Test-AppInsightsTelemetryFlow.ps1 -ConnectionString "InstrumentationKey=xxx;..." -NetworkOnly
 ```
 
-**Option 2: Install from PowerShell Gallery**
+**Option 2: Save from PowerShell Gallery**
 
 ```powershell
-Install-Script -Name Test-AppInsightsTelemetryFlow
-Test-AppInsightsTelemetryFlow -ConnectionString "InstrumentationKey=xxx;..."
+Save-Script -Name Test-AppInsightsTelemetryFlow -Path . -Force
+.\Test-AppInsightsTelemetryFlow.ps1 -ConnectionString "InstrumentationKey=xxx;..."
 ```
+
+> **Why `Save-Script` instead of `Install-Script`?** `Save-Script` downloads the `.ps1` file to the current directory — no admin rights, no PATH changes, and it works in most environments (Cloud Shell, VMs, restricted workstations). `Install-Script` places the script on `$env:PATH` so you can call it by name, but defaults to a machine-wide location that requires admin. Use `Install-Script -Scope CurrentUser` if you prefer the PATH convenience without elevation.
+>
+> **Note:** In the Windows **Kudu Debug Console** (App Service, Functions, Logic Apps), neither `Save-Script` nor `Invoke-WebRequest` works reliably. The NuGet provider cannot be bootstrapped, and `Invoke-WebRequest` fails with a Win32 console-buffer error. Use **drag and drop** in the Kudu file browser instead — see [Running the Script — App Service (Windows)](docs/running-the-script.md#azure-app-service-windows).
 
 **Option 3: Auto-detect in App Service (Kudu console)**
 
@@ -85,6 +119,8 @@ Test-AppInsightsTelemetryFlow -ConnectionString "InstrumentationKey=xxx;..."
 # If APPLICATIONINSIGHTS_CONNECTION_STRING is set in app settings, just run:
 .\Test-AppInsightsTelemetryFlow.ps1
 ```
+
+> **Execution policy (local workstations only):** Windows 10/11 defaults PowerShell 5.1 to `Restricted`, which blocks all scripts. If you see a "running scripts is disabled" error, run `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` once. PowerShell 7 (`pwsh`) and Azure environments (Kudu, Cloud Shell, VMs) already allow signed scripts.
 
 ### Parameters
 
@@ -143,13 +179,7 @@ Use `-NetworkOnly` to explicitly skip Azure checks even when logged in.
 
 **Compact (`-Compact`)** -- Compact progress lines with pass/fail status and a focused diagnosis summary at the end. Ideal for quick checks and automation.
 
-```
-  DNS Resolution ...................... OK     12/12 resolved (all public IPs)
-  TCP Connectivity .................... OK     12/12 reachable on :443
-  TLS Handshake ....................... OK     TLS 1.2, Microsoft cert
-  Telemetry Ingestion ................. OK     HTTP 200, accepted [412ms]
-  End-to-End Verification ............. OK     Record arrived (E2E: 8.2s)
-```
+![Compact mode output showing all checks passed with green OK status across DNS, TCP, TLS, AMPLS, authentication, sampling, workspace, daily cap, diagnostic settings, workspace transforms, telemetry ingestion, and end-to-end verification](docs/images/telemetry-flow-success.png)
 
 Both modes produce a **Diagnosis Summary** at the end with a prioritized action plan when issues are found:
 
@@ -347,6 +377,28 @@ appinsights-telemetry-flow/
 
 ---
 
+## Version History
+
+### v1.1.0
+
+- **Daily cap diagnostics unified.** Merged AI + LA checks into a single decision tree: OverQuota, SubscriptionSuspended, LA < AI mismatch, AI cap OFF + LA has cap, both OFF, aligned caps, and low-cap advisory.
+- **Backend LA workspace check narrowed.** Now reports existence, subscription status, and access mode only.
+- **HTTP 429 / 439 separated.** Throttling (429) and daily cap reached (439) diagnosed separately with distinct remediation.
+- **AMPLS: js.monitor.azure.com treated as expected-public.** Eliminates false-positive mixed-resolution warnings in Private Link environments.
+- **Manual verification KQL consolidated.** Single KQL block printed after Diagnosis Summary instead of inline in each E2E branch.
+- **LookupAmplsIp rebuilt** on standard progress-line pattern with diagnosis entry on validation failure.
+- **DNS debug tracing** added under `-Debug` — CNAME chain, record types, TTLs.
+- **ARG auth improvements.** Calls suppress Az module warnings; auth failures distinguish credential/MFA/token errors with targeted remediation.
+- **Output polish.** Diagnosis Summary header severity-colored; all-clear footer links SDK self-diagnostics and SDK Stats.
+- **Install guidance** changed to `Save-Script -Path .` for direct execution.
+- **Bash daily cap fix.** ARM API `-1.0` float now correctly detected as unlimited.
+
+### v1.0.0
+
+- Initial public release. DNS, TCP, TLS, ingestion test, E2E verification, AMPLS validation, known issue checks (local auth, daily cap, workspace health, ingestion sampling, DCR transforms). Azure checks auto-detect Az module availability.
+
+---
+
 ## Contributing
 
 Please open an issue to discuss proposed changes. For contributing information see [Contributing Details](CONTRIBUTING.md)
@@ -362,6 +414,10 @@ If you find a bug or have a feature request, please [open an issue](https://gith
 These scripts are provided as samples for diagnostic and troubleshooting purposes. They are not official Microsoft products and are not supported under any Microsoft standard support program or service.
 
 These scripts are provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of these scripts and their documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of these scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use these scripts or their documentation, even if Microsoft has been advised of the possibility of such damages.
+
+## Trademarks
+
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party's policies.
 
 ## License
 

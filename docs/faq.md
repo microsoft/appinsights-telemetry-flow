@@ -53,6 +53,8 @@ mean, and how to handle edge cases.
 29. [The script hangs during TLS handshake checks](#the-script-hangs-during-tls-handshake-checks)
 30. [The script crashes with a red error on PowerShell 5.1](#the-script-crashes-with-a-red-error-on-powershell-51)
 31. ["Search-AzGraph" fails or is not recognized](#search-azgraph-fails-or-is-not-recognized)
+32. [`Invoke-WebRequest` or `Save-Script` fails in the Kudu console](#invoke-webrequest-or-save-script-fails-in-the-kudu-console)
+33. [Azure checks fail with "Assembly with same name is already loaded"](#azure-checks-fail-with-assembly-with-same-name-is-already-loaded)
 
 ---
 
@@ -545,6 +547,85 @@ Install-Module -Name Az.ResourceGraph -Scope CurrentUser
 
 If you cannot install it, the script gracefully skips the DCR check and reports "Could
 not query" instead of crashing.
+
+### `Invoke-WebRequest` or `Save-Script` fails in the Kudu console
+
+The Windows Kudu Debug Console (used by App Service, Functions, and Logic Apps Standard)
+has a limited console host that does not support all PowerShell cmdlets:
+
+- **`Invoke-WebRequest`** fails with `Win32 internal error "The handle is invalid" 0x6` —
+  this is a known Kudu console-buffer limitation.
+- **`Save-Script`** fails because the NuGet package provider is not installed and
+  `Install-PackageProvider` cannot bootstrap it in this environment.
+
+**Workaround:** Download the `.ps1` file to your local machine, then **drag and drop** it
+into the Kudu file browser (navigate to `D:\home\LogFiles` or `C:\home\LogFiles` first).
+See [Running the Script — App Service (Windows)](running-the-script.md#azure-app-service-windows)
+for step-by-step instructions.
+
+### Azure checks fail with "Assembly with same name is already loaded"
+
+**Symptom:**
+
+```
+Checking prerequisites...
+Azure Resource Checks ............... SKIP   Az module load failed
+[i] Azure module prerequisites not met
+    Failed to import Az modules: Assembly with same name is already loaded
+```
+
+**Cause:**
+
+You have multiple versions of Azure PowerShell (Az) modules installed on your system.
+When PowerShell starts, it may auto-load an older version (via your profile or the
+PowerShell extension in VS Code). When the script tries to import the newer version, the
+.NET assemblies from the old version are already locked in memory, causing a conflict.
+
+**Solution:**
+
+1. **Check what versions are installed:**
+
+   ```powershell
+   Get-Module Az.* -ListAvailable | Select-Object Name, Version, Path | Format-Table
+   ```
+
+   If you see multiple versions of `Az.Accounts`, `Az.ResourceGraph`, or other Az modules,
+   that's the source of the problem.
+
+2. **Update all Az modules to the latest version:**
+
+   ```powershell
+   Update-Module Az -Force
+   ```
+
+   This may take several minutes.
+
+3. **(Optional) Clean up old versions:**
+
+   To remove all old versions and keep only the latest:
+
+   ```powershell
+   Get-InstalledModule Az.* | ForEach-Object {
+       $moduleName = $_.Name
+       Write-Host "Cleaning $moduleName..." -ForegroundColor Cyan
+       Get-InstalledModule $moduleName -AllVersions | 
+           Sort-Object Version -Descending | 
+           Select-Object -Skip 1 | 
+           Uninstall-Module -Force -Verbose
+   }
+   ```
+
+4. **Close and restart your PowerShell/terminal window completely**, then run the script again.
+
+The assembly conflict cannot be resolved within the same PowerShell session because .NET
+assemblies cannot be unloaded without restarting the process. A fresh terminal window
+will load only the latest version.
+
+**Prevention:**
+
+Check your PowerShell profile (`$PROFILE`) and remove any `Import-Module Az.*` statements
+that might be auto-loading modules at startup. This allows PowerShell to load modules
+on-demand with the correct version.
 
 ---
 
