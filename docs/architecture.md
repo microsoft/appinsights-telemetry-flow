@@ -26,7 +26,7 @@ drop data. The scripts test every layer from top to bottom.
 
 Unexpected telemetry behaviors map
 to one of four observable symptom categories. These are the **4D symptoms** —
-they describe what users *experiences* before anyone knows which layer
+they describe what users *experience* before anyone knows which layer
 is at fault:
 
 | Symptom | What the Customer Reports | Examples |
@@ -402,7 +402,7 @@ troubleshooting. The ingestion endpoint returns HTTP 200 (accepted), but data
 never appears in queries. Possible causes:
 
 1. **Daily cap** -- Data was accepted but silently discarded at the Log Analytics daily cap limit
-2. **Workspace deleted or re-created** -- Data was accepted but has nowhere to land. Re-fresh the link AI -> LA
+2. **Workspace deleted or re-created** -- Data was accepted but has nowhere to land. Refresh the link AI -> LA
 3. **DCR transform** -- Data was accepted but filtered by a KQL `where` clause
 4. **Ingestion delay** -- Data was accepted and will appear after full ingestion process
 

@@ -317,7 +317,7 @@ A Bash port of the PowerShell script with the same capabilities and output forma
 ./test-appinsights-telemetry-flow.sh --connection-string "InstrumentationKey=xxx;..." --auto-approve
 ```
 
-Requires Bash 5.0+ and `curl`. Azure resource checks require the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) with the `resource-graph` extension.
+Requires Bash 4.4+ (5.0+ recommended) and `curl`. Azure resource checks require the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) with the `resource-graph` extension.
 
 ---
 

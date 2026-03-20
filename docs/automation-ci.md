@@ -830,15 +830,18 @@ is identical:
 | `-TenantId "guid"` | `--tenant-id "guid"` |
 | `$LASTEXITCODE` | `$?` |
 
-The Bash script does not perform Azure resource checks (no AMPLS
-validation, known issue checks, or E2E verification). It focuses on
-network connectivity: DNS, TCP, TLS, and the ingestion API test.
+The Bash script can perform the same Azure resource checks as the PowerShell
+script (AMPLS validation, known issue checks, and E2E verification) when
+Azure CLI authentication is available (for example, `az login` has been run).
+When Azure login is not available, it falls back to network-only checks and
+focuses on DNS, TCP, TLS, and the ingestion API test.
 
 Exit codes are identical: `0` (clean), `1` (info), `2` (warning), `3` (blocking).
 
-JSON output structure is identical, with `AMPLS`, `KnownIssues`, and
-`EndToEndVerification` sections set to `null` since those checks are
-not performed.
+JSON output structure is identical. `AMPLS`, `KnownIssues`, and
+`EndToEndVerification` sections are populated when the corresponding Azure
+checks run, and are set to `null` when those checks are skipped (for example,
+when Azure CLI login is not available).
 
 ---
 

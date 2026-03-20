@@ -24,35 +24,35 @@ mean, and how to handle edge cases.
 12. [Why does "privatelink" appear in the DNS chain even though I don't use AMPLS?](#why-does-privatelink-appear-in-the-dns-chain-even-though-i-dont-use-ampls)
 
 #### TLS & Certificates
-11. [Why does TLS inspection show up on my private network?](#why-does-tls-inspection-show-up-on-my-private-network)
-12. [Why does the script test TLS 1.0 and 1.1 if they are deprecated?](#why-does-the-script-test-tls-10-and-11-if-they-are-deprecated)
-13. [Why does TLS 1.3 show "Not negotiated" on PowerShell 5.1?](#why-does-tls-13-show-not-negotiated-on-powershell-51)
+13. [Why does TLS inspection show up on my private network?](#why-does-tls-inspection-show-up-on-my-private-network)
+14. [Why does the script test TLS 1.0 and 1.1 if they are deprecated?](#why-does-the-script-test-tls-10-and-11-if-they-are-deprecated)
+15. [Why does TLS 1.3 show "Not negotiated" on PowerShell 5.1?](#why-does-tls-13-show-not-negotiated-on-powershell-51)
 
 #### Ingestion & E2E Verification
-14. [Ingestion returned HTTP 200 but no data appears in queries. Why?](#ingestion-returned-http-200-but-no-data-appears-in-queries-why)
-15. [Why does E2E verification sometimes fail (timeout)?](#why-does-e2e-verification-sometimes-fail-timeout)
-16. [What does HTTP 206 from the ingestion endpoint mean?](#what-does-http-206-from-the-ingestion-endpoint-mean)
-17. [What does HTTP 429 or 439 from the ingestion endpoint mean?](#what-does-http-429-or-439-from-the-ingestion-endpoint-mean)
+16. [Ingestion returned HTTP 200 but no data appears in queries. Why?](#ingestion-returned-http-200-but-no-data-appears-in-queries-why)
+17. [Why does E2E verification sometimes fail (timeout)?](#why-does-e2e-verification-sometimes-fail-timeout)
+18. [What does HTTP 206 from the ingestion endpoint mean?](#what-does-http-206-from-the-ingestion-endpoint-mean)
+19. [What does HTTP 429 or 439 from the ingestion endpoint mean?](#what-does-http-429-or-439-from-the-ingestion-endpoint-mean)
 
 #### Azure Checks
-18. [Why does Azure login get skipped in App Service / Functions / Containers?](#why-does-azure-login-get-skipped-in-app-service--functions--containers)
-19. [What permissions does the script need for Azure checks?](#what-permissions-does-the-script-need-for-azure-checks)
-20. [Can I run the script without any Azure login at all?](#can-i-run-the-script-without-any-azure-login-at-all)
-21. [What is the DIAGNOSIS SUMMARY?](#what-is-the-diagnosis-summary)
+20. [Why does Azure login get skipped in App Service / Functions / Containers?](#why-does-azure-login-get-skipped-in-app-service--functions--containers)
+21. [What permissions does the script need for Azure checks?](#what-permissions-does-the-script-need-for-azure-checks)
+22. [Can I run the script without any Azure login at all?](#can-i-run-the-script-without-any-azure-login-at-all)
+23. [What is the DIAGNOSIS SUMMARY?](#what-is-the-diagnosis-summary)
 
 #### Proxy & Firewall
-22. [What domains and ports does the script need outbound access to?](#what-domains-and-ports-does-the-script-need-outbound-access-to)
-23. [The script says TCP connection failed on port 443. What should I check?](#the-script-says-tcp-connection-failed-on-port-443-what-should-i-check)
+24. [What domains and ports does the script need outbound access to?](#what-domains-and-ports-does-the-script-need-outbound-access-to)
+25. [The script says TCP connection failed on port 443. What should I check?](#the-script-says-tcp-connection-failed-on-port-443-what-should-i-check)
 
 #### Output & Reports
-24. [Where are the output files saved?](#where-are-the-output-files-saved)
-25. [How do I share results with Microsoft Support?](#how-do-i-share-results-with-microsoft-support)
-26. [Can I suppress the output files?](#can-i-suppress-the-output-files)
+26. [Where are the output files saved?](#where-are-the-output-files-saved)
+27. [How do I share results with Microsoft Support?](#how-do-i-share-results-with-microsoft-support)
+28. [Can I suppress the output files?](#can-i-suppress-the-output-files)
 
 #### Troubleshooting the Script Itself
-27. [The script hangs during TLS handshake checks](#the-script-hangs-during-tls-handshake-checks)
-28. [The script crashes with a red error on PowerShell 5.1](#the-script-crashes-with-a-red-error-on-powershell-51)
-29. ["Search-AzGraph" fails or is not recognized](#search-azgraph-fails-or-is-not-recognized)
+29. [The script hangs during TLS handshake checks](#the-script-hangs-during-tls-handshake-checks)
+30. [The script crashes with a red error on PowerShell 5.1](#the-script-crashes-with-a-red-error-on-powershell-51)
+31. ["Search-AzGraph" fails or is not recognized](#search-azgraph-fails-or-is-not-recognized)
 
 ---
 

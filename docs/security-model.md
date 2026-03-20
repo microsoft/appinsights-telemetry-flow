@@ -193,7 +193,7 @@ and **how to skip** before asking for Y/N confirmation.
     [Net.SecurityProtocolType]::Tls12
 ```
 
-Set at script startup (line 282). Forces all `Invoke-WebRequest` and
+Set at script startup. Forces all `Invoke-WebRequest` and
 `Invoke-RestMethod` calls to negotiate TLS 1.2 or higher, even on
 older .NET Framework versions that default to TLS 1.0/1.1.
 
@@ -450,9 +450,12 @@ security model with platform-appropriate equivalents:
 | OutputPath UNC blocking | N/A (UNC paths do not apply on Linux/macOS) |
 | Debug truncation | `${body:0:$truncate_len}` |
 
-Azure resource checks are PS-only (they require `Az.Accounts` and
-`Az.ResourceGraph`). The Bash script performs network-level checks
-only.
+Azure resource checks in PowerShell use `Az.Accounts` and
+`Az.ResourceGraph`. The Bash script performs equivalent network-level
+checks and, when Azure CLI (`az`) is installed and authenticated
+(`az login`), also runs Azure Resource Graph queries (`az graph query`)
+and ARM calls (`az rest`) for AMPLS / known-issues / end-to-end
+verification.
 
 ---
 

@@ -37,7 +37,7 @@
 2. Access to a shell on the machine or environment where your app is running — this is the machine whose network path you want to test.
 3. [Optional — network checks work without it.] For Azure resource checks (AMPLS validation, known issue detection, or end‑to‑end verification): 
 
-      - **PowerShell**: `Az.Accounts`and `Az.ResourceGraph` modules signed in with **Reader** access  
+      - **PowerShell**: `Az.Accounts` and `Az.ResourceGraph` modules signed in with **Reader** access  
       *or*
       - **Bash**: Azure CLI (`az`) signed in with **Reader** access
 
@@ -48,7 +48,7 @@
 | Environment shell | Script |
 |---|---|
 | PowerShell 5.1+ (Windows) or pwsh 7+ | `Test-AppInsightsTelemetryFlow.ps1` |
-| Bash 4.0+ with `curl` | `test-appinsights-telemetry-flow.sh` |
+| Bash 4.4+ (5.0+ recommended) with `curl` | `test-appinsights-telemetry-flow.sh` |
 
 **Quick download commands** (used in most sections below):
 

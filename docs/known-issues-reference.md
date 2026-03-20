@@ -191,7 +191,7 @@ The workspace is permanently gone. You must:
 
 1. Create a new Log Analytics workspace (or identify an existing one).
 2. Go to **Application Insights → Properties → Change workspace**.
-3. Re‑associate the Application Insights resource with the all new workspace, or with any re‑created workspace that retains the original Log Analytics URI, but has a new workspace id value.
+3. Re‑associate the Application Insights resource with the new workspace, or with any re‑created workspace that retains the original Log Analytics URI, but has a new workspace id value.
 4. Note: historical data from the deleted workspace is not recoverable.
 
 **Docs:** [Recover a deleted Log Analytics workspace](https://learn.microsoft.com/azure/azure-monitor/logs/delete-workspace#recover-a-workspace)
@@ -316,7 +316,7 @@ format) to tell you exactly when ingestion will resume.
 The behavior depends on whether Application Insights and its backing Log Analytics
 workspace are in the **same** or **different** Azure subscriptions:
 
-**Same subscription:** The ingestion API returns a **non-200 response** to your SDKs, leading to telemetry dopped behaviors. This failure will show up in the SDK self-diagnostic logs without impacting your running application. 
+**Same subscription:** The ingestion API returns a **non-200 response** to your SDKs, leading to telemetry dropped behaviors. This failure will show up in the SDK self-diagnostic logs without impacting your running application. 
 
 **Cross-subscription (AI in subscription A, LA workspace in subscription B, and
 subscription B is suspended):** The Application Insights ingestion API returns **HTTP
