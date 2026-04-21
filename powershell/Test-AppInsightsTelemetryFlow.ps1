@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 1.0.0
+.VERSION 1.1.0
 .GUID b7e4f2a3-9c1d-4e8f-a5b6-3d2c1e0f9a8b
 .AUTHOR Todd Foust (Microsoft)
 .COMPANYNAME Microsoft
@@ -8,6 +8,18 @@
 .PROJECTURI https://github.com/microsoft/appinsights-telemetry-flow
 .LICENSEURI https://github.com/microsoft/appinsights-telemetry-flow/blob/main/LICENSE
 .RELEASENOTES
+  v1.1.0 - Daily cap diagnostics unified into a single decision tree (OverQuota,
+           SubscriptionSuspended, LA < AI, AI OFF + LA cap, both OFF, aligned, low-cap
+           advisory); Backend LA workspace check narrowed to existence, subscription
+           status, and access mode. HTTP 429 and 439 diagnosed separately with distinct
+           remediation. AMPLS validation treats js.monitor.azure.com as expected-public.
+           Manual verification KQL consolidated after Diagnosis Summary. LookupAmplsIp
+           rebuilt on standard progress-line pattern. DNS debug tracing added under
+           -Debug (CNAME chain, record types, TTLs). ARG calls suppress Az warnings;
+           auth failures distinguish credential/MFA/token errors with targeted fixes.
+           Diagnosis Summary header severity-colored; all-clear footer links SDK self-
+           diagnostics and SDK Stats. Install guidance changed to Save-Script -Path.
+           Bash daily cap detection fixed for ARM API -1.0 float.
   v1.0.0 - Initial public release. DNS, TCP, TLS, ingestion test, E2E verification,
            AMPLS validation, known issue checks (local auth, daily cap, workspace health,
            ingestion sampling, DCR transforms). Azure checks auto-detect Az module.
@@ -24,8 +36,8 @@
     sends a test telemetry record to confirm end-to-end pipeline health.
 
     QUICK START:
-      Install-Script -Name Test-AppInsightsTelemetryFlow
-      Test-AppInsightsTelemetryFlow -ConnectionString "InstrumentationKey=..."
+      Save-Script -Name Test-AppInsightsTelemetryFlow -Path .
+      .\Test-AppInsightsTelemetryFlow.ps1 -ConnectionString "InstrumentationKey=..."
 
     WHAT IT CHECKS:
       - DNS resolution for all Azure Monitor endpoints
@@ -249,10 +261,10 @@
     this script or its documentation, even if Microsoft has been
     advised of the possibility of such damages.
 
-    Version: 1.0.0
+    Version: 1.1.0
     Author:  Todd Foust - Azure Monitor App Insights Supportability Engineer
     Source:  https://github.com/microsoft/appinsights-telemetry-flow
-    Install: Install-Script -Name Test-AppInsightsTelemetryFlow
+    Install: Save-Script -Name Test-AppInsightsTelemetryFlow -Path .
     Docs:    https://github.com/microsoft/appinsights-telemetry-flow
 
     EXIT CODES:
@@ -297,11 +309,206 @@ param(
     [string]$LookupAmplsIp
 )
 
+#region Console Color Detection
+# ============================================================================
+# CONSOLE COLOR DETECTION
+# ============================================================================
+# Kudu web console, Azure Cloud Shell (classic), and some CI environments don't
+# have a real Win32 console handle. Write-Host -ForegroundColor calls
+# SetConsoleTextAttribute which throws "The handle is invalid" (0x6).
+# Detect this by actually attempting a colored Write-Host with errors set to Stop.
+
+$script:UseColor = $true
+$originalEAP = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Stop"
+    # This is the real test: attempt a colored Write-Host with no visible output.
+    # If SetConsoleTextAttribute fails, this throws a terminating error.
+    Write-Host "" -ForegroundColor Gray -NoNewline
+    $ErrorActionPreference = $originalEAP
+}
+catch {
+    $ErrorActionPreference = $originalEAP
+    $script:UseColor = $false
+}
+
+# If UseColor is false, the Write-HostLog function (defined below)
+# will route output through [System.Console]::Write/WriteLine instead of the real
+# Write-Host cmdlet, avoiding the SetConsoleTextAttribute crash in Kudu/App Service.
+
+#endregion Console Color Detection
+
+#region Write-HostLog
+# ============================================================================
+# WRITE-HOSTLOG HELPER
+# ============================================================================
+# Console output capture via Write-HostLog:
+# Start-Transcript doesn't handle -NoNewline properly (each Write-Host call
+# becomes a separate line), so Write-HostLog wraps Write-Host with a function that
+# writes to console AND captures to a StringBuilder with correct line handling.
+
+$script:consoleLog = [System.Text.StringBuilder]::new()
+$script:consoleLogPending = ""
+
+function Write-HostLog {
+    param(
+        [Parameter(Position=0)]
+        [object]$Object = "",
+        [switch]$NoNewline,
+        [System.ConsoleColor]$ForegroundColor,
+        [System.ConsoleColor]$BackgroundColor,
+        [string]$Separator
+    )
+
+    # Route to console: real Write-Host (color) or System.Console (Kudu/no-color)
+    if ($script:UseColor) {
+        $params = @{ Object = $Object }
+        if ($NoNewline) { $params.NoNewline = $true }
+        if ($PSBoundParameters.ContainsKey('ForegroundColor')) { $params.ForegroundColor = $ForegroundColor }
+        if ($PSBoundParameters.ContainsKey('BackgroundColor')) { $params.BackgroundColor = $BackgroundColor }
+        Microsoft.PowerShell.Utility\Write-Host @params
+    } else {
+        # Kudu/App Service: Write-Host crashes on SetConsoleTextAttribute.
+        # Use [System.Console] which writes to stdout without touching console attributes.
+        $text = if ($null -ne $Object) { "$Object" } else { "" }
+        if ($NoNewline) {
+            [System.Console]::Write($text)
+        } else {
+            [System.Console]::WriteLine($text)
+        }
+    }
+
+    # Capture to log (color stripped, line breaks preserved)
+    if ($NoNewline) {
+        $script:consoleLogPending += [string]$Object
+    } else {
+        [void]$script:consoleLog.AppendLine($script:consoleLogPending + [string]$Object)
+        $script:consoleLogPending = ""
+    }
+}
+
+#endregion Write-HostLog
+
+#region Debug Helpers
+# ============================================================================
+# DEBUG HELPERS (-Debug mode)
+# ============================================================================
+# When -Debug is passed, these functions log outbound HTTP requests and
+# responses so customers can see exactly what API calls the script makes.
+# We use Write-HostLog (not Write-Debug) to avoid $DebugPreference='Inquire'
+# prompting and to prevent Az cmdlet debug noise from flooding output.
+
+function Write-DebugRequest {
+    param(
+        [string]$Method,
+        [string]$Url,
+        [string]$Body = ""
+    )
+    if (-not $scriptDebugMode) { return }
+    Write-HostLog "  [DEBUG] >>> $Method $Url" -ForegroundColor Yellow
+    if ($Body) {
+        $preview = if ($DebugTruncateLength -gt 0 -and $Body.Length -gt $DebugTruncateLength) { $Body.Substring(0, $DebugTruncateLength) + "... ($($Body.Length) chars total)" } else { $Body }
+        Write-HostLog "  [DEBUG] >>> Body: $preview" -ForegroundColor Yellow
+    }
+}
+
+function Write-DebugResponse {
+    param(
+        [string]$Status,
+        [string]$Body = ""
+    )
+    if (-not $scriptDebugMode) { return }
+    Write-HostLog "  [DEBUG] <<< $Status" -ForegroundColor Yellow
+    if ($Body) {
+        $preview = if ($DebugTruncateLength -gt 0 -and $Body.Length -gt $DebugTruncateLength) { $Body.Substring(0, $DebugTruncateLength) + "... ($($Body.Length) chars total)" } else { $Body }
+        Write-HostLog "  [DEBUG] <<< Body: $preview" -ForegroundColor Yellow
+    }
+}
+
+function Write-DebugAzGraph {
+    param([string]$Query)
+    if (-not $scriptDebugMode) { return }
+    Write-HostLog "  [DEBUG] >>> POST https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01" -ForegroundColor Yellow
+    Write-HostLog "  [DEBUG] >>> ARG Query: $Query" -ForegroundColor Yellow
+}
+
+function Write-DebugAzRest {
+    param(
+        [string]$Method,
+        [string]$Path
+    )
+    if (-not $scriptDebugMode) { return }
+    Write-HostLog "  [DEBUG] >>> $Method https://management.azure.com$Path" -ForegroundColor Yellow
+}
+
+function Write-ScriptDebug {
+    param([string]$Message)
+    if (-not $scriptDebugMode) { return }
+    Write-HostLog "  [DEBUG] $Message" -ForegroundColor Yellow
+}
+
+function Write-DebugDnsTrace {
+    <#
+    .SYNOPSIS
+        Runs a supplementary DNS probe in debug mode to show the full CNAME chain,
+        responding DNS server, and record TTLs. Uses Resolve-DnsName on Windows,
+        falls back to nslookup on Linux/macOS. This is purely diagnostic output --
+        it never affects PASS/FAIL results.
+    #>
+    param([string]$Hostname)
+    if (-not $scriptDebugMode) { return }
+
+    try {
+        if ($IsWindows -or $env:OS -eq "Windows_NT") {
+            # Windows: try Resolve-DnsName for structured record data
+            $cmdInfo = Get-Command Resolve-DnsName -ErrorAction SilentlyContinue
+            if ($cmdInfo) {
+                $records = Resolve-DnsName -Name $Hostname -DnsOnly -ErrorAction Stop
+                # Identify the DNS server from the first record's metadata if available
+                foreach ($rec in $records) {
+                    if ($rec.PSObject.Properties['NameHost'] -and $rec.Type -eq 'SOA') { continue }
+                    if ($rec.Type -eq 'CNAME') {
+                        Write-ScriptDebug "  CNAME $($rec.Name) -> $($rec.NameHost) [TTL=$($rec.TTL)]"
+                    }
+                    elseif ($rec.Type -eq 'A') {
+                        Write-ScriptDebug "  A     $($rec.Name) -> $($rec.IPAddress) [TTL=$($rec.TTL)]"
+                    }
+                    elseif ($rec.Type -eq 'AAAA') {
+                        Write-ScriptDebug "  AAAA  $($rec.Name) -> $($rec.IPAddress) [TTL=$($rec.TTL)]"
+                    }
+                    else {
+                        Write-ScriptDebug "  $($rec.Type) $($rec.Name) [TTL=$($rec.TTL)]"
+                    }
+                }
+            } else {
+                # Resolve-DnsName not available on this Windows host; fall back to nslookup
+                $nsOutput = & nslookup $Hostname 2>&1 | Out-String
+                foreach ($line in ($nsOutput -split "`n")) {
+                    $trimmed = $line.TrimEnd()
+                    if ($trimmed) { Write-ScriptDebug "  nslookup: $trimmed" }
+                }
+            }
+        } else {
+            # Linux / macOS: use nslookup (widely available)
+            $nsOutput = & nslookup $Hostname 2>&1 | Out-String
+            foreach ($line in ($nsOutput -split "`n")) {
+                $trimmed = $line.TrimEnd()
+                if ($trimmed) { Write-ScriptDebug "  nslookup: $trimmed" }
+            }
+        }
+    }
+    catch {
+        Write-ScriptDebug "  DNS trace probe failed: $($_.Exception.Message)"
+    }
+}
+
+#endregion Debug Helpers
+
 #region Configuration
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-$ScriptVersion = "1.0.0"
+$ScriptVersion = "1.1.0"
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
@@ -368,35 +575,6 @@ if (-not $NetworkOnly) {
 }
 
 #endregion Configuration
-
-#region Console Color Detection
-# ============================================================================
-# CONSOLE COLOR DETECTION
-# ============================================================================
-# Kudu web console, Azure Cloud Shell (classic), and some CI environments don't
-# have a real Win32 console handle. Write-Host -ForegroundColor calls
-# SetConsoleTextAttribute which throws "The handle is invalid" (0x6).
-# Detect this by actually attempting a colored Write-Host with errors set to Stop.
-
-$script:UseColor = $true
-$originalEAP = $ErrorActionPreference
-try {
-    $ErrorActionPreference = "Stop"
-    # This is the real test: attempt a colored Write-Host with no visible output.
-    # If SetConsoleTextAttribute fails, this throws a terminating error.
-    Write-Host "" -ForegroundColor Gray -NoNewline
-    $ErrorActionPreference = $originalEAP
-}
-catch {
-    $ErrorActionPreference = $originalEAP
-    $script:UseColor = $false
-}
-
-# If UseColor is false, the Write-HostLog function (defined before MAIN EXECUTION)
-# will route output through [System.Console]::Write/WriteLine instead of the real
-# Write-Host cmdlet, avoiding the SetConsoleTextAttribute crash in Kudu/App Service.
-
-#endregion Console Color Detection
 
 #region Helper Functions
 # ============================================================================
@@ -682,50 +860,6 @@ function Get-Timestamp {
     return (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
 }
 
-# ---- Console output capture via Write-HostLog ----
-# Start-Transcript doesn't handle -NoNewline properly (each Write-Host call
-# becomes a separate line), so Write-HostLog wraps Write-Host with a function that
-# writes to console AND captures to a StringBuilder with correct line handling.
-$script:consoleLog = [System.Text.StringBuilder]::new()
-$script:consoleLogPending = ""
-
-function Write-HostLog {
-    param(
-        [Parameter(Position=0)]
-        [object]$Object = "",
-        [switch]$NoNewline,
-        [System.ConsoleColor]$ForegroundColor,
-        [System.ConsoleColor]$BackgroundColor,
-        [string]$Separator
-    )
-
-    # Route to console: real Write-Host (color) or System.Console (Kudu/no-color)
-    if ($script:UseColor) {
-        $params = @{ Object = $Object }
-        if ($NoNewline) { $params.NoNewline = $true }
-        if ($PSBoundParameters.ContainsKey('ForegroundColor')) { $params.ForegroundColor = $ForegroundColor }
-        if ($PSBoundParameters.ContainsKey('BackgroundColor')) { $params.BackgroundColor = $BackgroundColor }
-        Microsoft.PowerShell.Utility\Write-Host @params
-    } else {
-        # Kudu/App Service: Write-Host crashes on SetConsoleTextAttribute.
-        # Use [System.Console] which writes to stdout without touching console attributes.
-        $text = if ($null -ne $Object) { "$Object" } else { "" }
-        if ($NoNewline) {
-            [System.Console]::Write($text)
-        } else {
-            [System.Console]::WriteLine($text)
-        }
-    }
-
-    # Capture to log (color stripped, line breaks preserved)
-    if ($NoNewline) {
-        $script:consoleLogPending += [string]$Object
-    } else {
-        [void]$script:consoleLog.AppendLine($script:consoleLogPending + [string]$Object)
-        $script:consoleLogPending = ""
-    }
-}
-
 function Request-UserConsent {
     [CmdletBinding()]
     param(
@@ -800,66 +934,6 @@ function Request-UserConsent {
 }
 
 #endregion Helper Functions
-
-#region Debug Helpers
-# ============================================================================
-# DEBUG HELPERS (-Debug mode)
-# ============================================================================
-# When -Debug is passed, these functions log outbound HTTP requests and
-# responses so customers can see exactly what API calls the script makes.
-# We use Write-HostLog (not Write-Debug) to avoid $DebugPreference='Inquire'
-# prompting and to prevent Az cmdlet debug noise from flooding output.
-
-function Write-DebugRequest {
-    param(
-        [string]$Method,
-        [string]$Url,
-        [string]$Body = ""
-    )
-    if (-not $scriptDebugMode) { return }
-    Write-HostLog "  [DEBUG] >>> $Method $Url" -ForegroundColor Yellow
-    if ($Body) {
-        $preview = if ($DebugTruncateLength -gt 0 -and $Body.Length -gt $DebugTruncateLength) { $Body.Substring(0, $DebugTruncateLength) + "... ($($Body.Length) chars total)" } else { $Body }
-        Write-HostLog "  [DEBUG] >>> Body: $preview" -ForegroundColor Yellow
-    }
-}
-
-function Write-DebugResponse {
-    param(
-        [string]$Status,
-        [string]$Body = ""
-    )
-    if (-not $scriptDebugMode) { return }
-    Write-HostLog "  [DEBUG] <<< $Status" -ForegroundColor Yellow
-    if ($Body) {
-        $preview = if ($DebugTruncateLength -gt 0 -and $Body.Length -gt $DebugTruncateLength) { $Body.Substring(0, $DebugTruncateLength) + "... ($($Body.Length) chars total)" } else { $Body }
-        Write-HostLog "  [DEBUG] <<< Body: $preview" -ForegroundColor Yellow
-    }
-}
-
-function Write-DebugAzGraph {
-    param([string]$Query)
-    if (-not $scriptDebugMode) { return }
-    Write-HostLog "  [DEBUG] >>> POST https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01" -ForegroundColor Yellow
-    Write-HostLog "  [DEBUG] >>> ARG Query: $Query" -ForegroundColor Yellow
-}
-
-function Write-DebugAzRest {
-    param(
-        [string]$Method,
-        [string]$Path
-    )
-    if (-not $scriptDebugMode) { return }
-    Write-HostLog "  [DEBUG] >>> $Method https://management.azure.com$Path" -ForegroundColor Yellow
-}
-
-function Write-ScriptDebug {
-    param([string]$Message)
-    if (-not $scriptDebugMode) { return }
-    Write-HostLog "  [DEBUG] $Message" -ForegroundColor Yellow
-}
-
-#endregion Debug Helpers
 
 #region Parse Connection String
 # ============================================================================
@@ -1051,6 +1125,8 @@ function Test-DnsResolution {
         DnsFailureLabel = ""
     }
 
+    Write-ScriptDebug "DNS resolving: $Hostname"
+
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $dns = [System.Net.Dns]::GetHostAddresses($Hostname)
@@ -1088,6 +1164,11 @@ function Test-DnsResolution {
         $result.Detail = $failInfo.Detail
         $result.Action = $failInfo.Action
     }
+
+    # Supplementary debug trace: show full CNAME chain, DNS server, TTLs
+    Write-DebugDnsTrace -Hostname $Hostname
+    Write-ScriptDebug "DNS result: $Hostname -> $($result.IpAddresses -join ', ') [$($result.DurationMs)ms] ($($result.Status))"
+    Write-ScriptDebug "--------------------------------------------------------------------------------"
 
     return $result
 }
@@ -1588,11 +1669,11 @@ function Test-IngestionEndpoint {
             }
             429 {
                 $result.Detail = "HTTP 429 Too Many Requests (Throttled)"
-                $result.Action = "You are being rate-limited. This typically occurs when ingestion volume is extremely high or the daily cap has been reached."
+                $result.Action = "You are being rate-limited. This typically occurs when ingestion volume is extremely high. Retry after a brief delay."
             }
             439 {
-                $result.Detail = "HTTP 439 Too Many Requests (Daily Cap)"
-                $result.Action = "Daily ingestion cap has been reached. No more data will be accepted until the cap resets at the configured reset hour (UTC)."
+                $result.Detail = "HTTP 439 Daily Cap Reached"
+                $result.Action = "The App Insights daily ingestion cap has been reached. No more data will be accepted until the cap resets at the configured reset hour (UTC). Check App Insights > Usage and estimated costs > Daily Cap."
             }
             500 {
                 $result.Detail = "HTTP 500 Internal Server Error"
@@ -1921,6 +2002,7 @@ availabilityResults
             Write-HostLog "query error" -ForegroundColor Red
             if ($VerboseOutput) {
                 Write-HostLog "      Error: $($queryResult.Error)" -ForegroundColor DarkGray
+                Write-HostLog ""
             }
         }
         $overallSw.Stop()
@@ -1983,6 +2065,7 @@ availabilityResults
                 Write-HostLog "query error" -ForegroundColor Red
                 if ($VerboseOutput) {
                     Write-HostLog "      Error: $($queryResult.Error)" -ForegroundColor DarkGray
+                    Write-HostLog ""
                 }
             }
             $result.Error = $queryResult.Error
@@ -2274,14 +2357,14 @@ resources
     $nicResult = $null
     try {
         Write-DebugAzGraph -Query $nicQuery
-        $nicResult = Search-AzGraph -Query $nicQuery -UseTenantScope -ErrorAction Stop
+        $nicResult = Search-AzGraph -Query $nicQuery -UseTenantScope -WarningAction SilentlyContinue -ErrorAction Stop
         Write-DebugResponse -Status "NIC lookup: $(@($nicResult).Count) result(s)"
     }
     catch {
         # Fallback to subscription list
         try {
             $currentTenantId = (Get-AzContext).Tenant.Id
-            $subs = @(Get-AzSubscription -TenantId $currentTenantId -ErrorAction SilentlyContinue)
+            $subs = @(Get-AzSubscription -TenantId $currentTenantId -WarningAction SilentlyContinue -ErrorAction SilentlyContinue)
             $subIds = @(); foreach ($s in $subs) { $subIds += $s.Id }
             if ($subIds.Count -gt 0) {
                 $nicResult = Search-AzGraph -Query $nicQuery -Subscription $subIds -ErrorAction Stop
@@ -2317,13 +2400,13 @@ resources
     $peResult = $null
     try {
         Write-DebugAzGraph -Query $peQuery
-        $peResult = Search-AzGraph -Query $peQuery -UseTenantScope -ErrorAction Stop
+        $peResult = Search-AzGraph -Query $peQuery -UseTenantScope -WarningAction SilentlyContinue -ErrorAction Stop
         Write-DebugResponse -Status "PE lookup: $(@($peResult).Count) result(s)"
     }
     catch {
         try {
             $currentTenantId = (Get-AzContext).Tenant.Id
-            $subs = @(Get-AzSubscription -TenantId $currentTenantId -ErrorAction SilentlyContinue)
+            $subs = @(Get-AzSubscription -TenantId $currentTenantId -WarningAction SilentlyContinue -ErrorAction SilentlyContinue)
             $subIds = @(); foreach ($s in $subs) { $subIds += $s.Id }
             if ($subIds.Count -gt 0) {
                 $peResult = Search-AzGraph -Query $peQuery -Subscription $subIds -ErrorAction Stop
@@ -2572,7 +2655,7 @@ Install the Az PowerShell module:
         $importError = $_.Exception.Message
 
         # Detect version conflict -- try removing old version and re-importing
-        if ($importError -match "earlier version.*imported|version.*already.*imported|requires.*version") {
+        if ($importError -match "earlier version.*imported|version.*already.*imported|requires.*version|Assembly with same name") {
             if ($VerboseOutput) {
                 Write-HostLog "  [i] Az module version conflict detected -- attempting to resolve..." -ForegroundColor Yellow
             }
@@ -2633,7 +2716,7 @@ function Find-AppInsightsResource {
             Write-HostLog "    Searching entire tenant with -UseTenantScope..." -ForegroundColor Gray
         }
         Write-DebugAzGraph -Query $query
-        $results = Search-AzGraph -Query $query -UseTenantScope -ErrorAction Stop
+        $results = Search-AzGraph -Query $query -UseTenantScope -WarningAction SilentlyContinue -ErrorAction Stop
         if ($results -and $results.Count -gt 0) {
             Write-DebugResponse -Status "Found $($results.Count) result(s)" -Body ($results[0] | ConvertTo-Json -Depth 5 -Compress -ErrorAction SilentlyContinue)
             return $results[0]
@@ -2642,7 +2725,9 @@ function Find-AppInsightsResource {
         }
     }
     catch {
-        # -UseTenantScope may not be available in older module versions
+        # -UseTenantScope may not be available in older module versions, or auth may
+        # fail for some tenants (MFA, conditional access). Fall back to subscription list.
+        Write-ScriptDebug "Tenant-scope search not available: $($_.Exception.Message)"
         if ($VerboseOutput) {
             Write-HostLog "    Tenant-scope search not available ($($_.Exception.Message)), falling back to subscription list..." -ForegroundColor DarkGray
         }
@@ -2651,10 +2736,10 @@ function Find-AppInsightsResource {
     # Strategy 2: Fall back to explicit subscription list batching
     try {
         $currentTenantId = (Get-AzContext).Tenant.Id
-        $subs = @(Get-AzSubscription -TenantId $currentTenantId -ErrorAction SilentlyContinue)
+        $subs = @(Get-AzSubscription -TenantId $currentTenantId -WarningAction SilentlyContinue -ErrorAction SilentlyContinue)
 
         if ($subs.Count -eq 0) {
-            $subs = @(Get-AzSubscription -ErrorAction SilentlyContinue)
+            $subs = @(Get-AzSubscription -WarningAction SilentlyContinue -ErrorAction SilentlyContinue)
         }
 
         if ($subs.Count -gt 0) {
@@ -2687,8 +2772,29 @@ function Find-AppInsightsResource {
         }
     }
     catch {
-        Write-Result -Status "INFO" -Check "Resource Graph query failed: $($_.Exception.Message)" `
-            -Action "Ensure your account has Reader access to the subscription containing the App Insights resource."
+        $argError = $_.Exception.Message
+        $currentUser = try { (Get-AzContext).Account.Id } catch { $null }
+        $maskedUser = if ($currentUser) { Get-MaskedEmail $currentUser } else { "<unknown>" }
+
+        # Detect auth/credential errors vs. generic query failures
+        if ($argError -match 'credentials have not been set up|have expired|User interaction is required|MFA|conditional access') {
+            Write-Result -Status "INFO" -Check "Resource Graph query failed (authentication error)" `
+                -Detail "Current identity: $maskedUser. Your session token may have expired, or this identity may not have access to the target subscription." `
+                -Action @"
+Possible fixes:
+      1. If you are logged in as the WRONG user, switch identity:
+           Disconnect-AzAccount
+           Connect-AzAccount           (log in with the account that owns the App Insights resource)
+      2. If you need a DIFFERENT TENANT, re-run with:
+           -TenantId 'your-tenant-id-or-domain.onmicrosoft.com'
+      3. If your session EXPIRED, re-authenticate:
+           Connect-AzAccount
+"@
+        } else {
+            Write-Result -Status "INFO" -Check "Resource Graph query failed: $argError" `
+                -Detail "Current identity: $maskedUser" `
+                -Action "Ensure this account has Reader access to the subscription containing the App Insights resource."
+        }
     }
 
     return $null
@@ -2889,13 +2995,13 @@ resources
         $privateEndpoints = $null
         try {
             Write-DebugAzGraph -Query $query
-            $privateEndpoints = Search-AzGraph -Query $query -UseTenantScope -ErrorAction Stop
+            $privateEndpoints = Search-AzGraph -Query $query -UseTenantScope -WarningAction SilentlyContinue -ErrorAction Stop
             Write-DebugResponse -Status "Found $(@($privateEndpoints).Count) private endpoint(s)"
         }
         catch {
             # Fallback to subscription list
             $currentTenantId = (Get-AzContext).Tenant.Id
-            $subs = @(Get-AzSubscription -TenantId $currentTenantId -ErrorAction SilentlyContinue)
+            $subs = @(Get-AzSubscription -TenantId $currentTenantId -WarningAction SilentlyContinue -ErrorAction SilentlyContinue)
             $subIds = @()
             if ($subs.Count -gt 0) { foreach ($s in $subs) { $subIds += $s.Id } }
 
@@ -3634,6 +3740,7 @@ if ($VerboseOutput) {
     Write-HostLog "  - If using AMPLS: All endpoints resolve to PRIVATE IPs consistently" -ForegroundColor Gray
     Write-HostLog "  - If NOT using AMPLS: All endpoints resolve to PUBLIC Microsoft IPs" -ForegroundColor Gray
     Write-HostLog "  - No mixed public/private results (indicates incomplete AMPLS setup)" -ForegroundColor Gray
+    Write-HostLog "  - Exception: js.monitor.azure.com (JS SDK CDN) is expected to remain public with AMPLS" -ForegroundColor Gray
     Write-HostLog ""
 
     # Get DNS server information
@@ -3693,6 +3800,23 @@ foreach ($dr in $dnsResults) {
             if ($ip -and $script:ResolvedIpRegistry -notcontains $ip) {
                 $script:ResolvedIpRegistry += $ip
             }
+        }
+    }
+}
+
+# --- Determine if only the JS SDK CDN (js.monitor.azure.com) resolved to public ---
+# AMPLS/Private Endpoint DNS zones never include js.monitor.azure.com, so it is
+# expected to resolve to a public IP even in a fully-configured AMPLS environment.
+# If that is the ONLY public endpoint and all others are private, treat as "all private".
+$jsCdnOnlyPublic = $false
+if ($hasAmplsSignals -and $hasPublicIps) {
+    $publicEndpoints = @($dnsResults | Where-Object { $_.Status -eq "PASS" -and -not $_.IsPrivateIp })
+    if ($publicEndpoints.Count -gt 0 -and ($publicEndpoints | ForEach-Object { $_.Hostname }) -notcontains $null) {
+        $nonJsCdnPublic = @($publicEndpoints | Where-Object { $_.Hostname -ne "js.monitor.azure.com" })
+        if ($nonJsCdnPublic.Count -eq 0) {
+            # Only js.monitor.azure.com is public -- this is expected with AMPLS
+            $jsCdnOnlyPublic = $true
+            $hasPublicIps = $false
         }
     }
 }
@@ -3833,6 +3957,11 @@ if ($VerboseOutput) {
         } else {
             Write-HostLog "  [OK] " -ForegroundColor Green -NoNewline
             Write-HostLog "All tested endpoints resolve to private IPs (consistent AMPLS configuration)." -ForegroundColor Green
+            if ($jsCdnOnlyPublic) {
+                Write-HostLog ""
+                Write-HostLog "      NOTE: js.monitor.azure.com (JS SDK CDN) resolved to a public IP. This is expected." -ForegroundColor DarkGray
+                Write-HostLog "      AMPLS private DNS zones do not include the JavaScript SDK CDN hostname." -ForegroundColor DarkGray
+            }
             Write-HostLog ""
             Write-HostLog "      To verify these IPs match your AMPLS configuration:" -ForegroundColor Gray
             Write-HostLog "      1. Go to Azure Portal > Your AMPLS resource > Private Endpoint Connections" -ForegroundColor Gray
@@ -5236,32 +5365,60 @@ elseif ($hasAmplsSignals -and -not $CheckAzure -and (-not $AmplsExpectedIps -or 
 # ============================================================================
 if ($LookupAmplsIp) {
     $stepNumber++
-    Write-HeaderEntry "STEP $($stepNumber): AMPLS Reverse-Lookup (Manual)"
-    Write-HostLog ""
-    Write-HostLog "  Validating IP: $LookupAmplsIp" -ForegroundColor Gray
+    Write-Header "STEP $($stepNumber): AMPLS Reverse-Lookup (Manual)"
+    if ($VerboseOutput) {
+        Write-HostLog ""
+        Write-HostLog "  WHY THIS MATTERS:" -ForegroundColor Cyan
+        Write-HostLog "  When DNS resolves Azure Monitor endpoints to private IPs, a 'ghost' AMPLS (an AMPLS" -ForegroundColor Gray
+        Write-HostLog "  you don't manage) can intercept your telemetry. This happens because ALL AMPLS resources" -ForegroundColor Gray
+        Write-HostLog "  in the tenant share the same privatelink DNS zones. If another team's AMPLS has" -ForegroundColor Gray
+        Write-HostLog "  'Private Only' ingestion mode and your resource isn't linked to it, your data is" -ForegroundColor Gray
+        Write-HostLog "  silently dropped -- even though DNS resolved successfully." -ForegroundColor Gray
+        Write-HostLog ""
+        Write-HostLog "  WHAT WE'RE CHECKING:" -ForegroundColor Cyan
+        Write-HostLog "  - Validate the IP is a private (RFC1918) address seen during this run's DNS checks" -ForegroundColor Gray
+        Write-HostLog "  - Trace the IP back through Azure: NIC -> Private Endpoint -> AMPLS resource" -ForegroundColor Gray
+        Write-HostLog "  - Report the owning AMPLS name, resource group, subscription, and access modes" -ForegroundColor Gray
+        Write-HostLog "  - Flag if the AMPLS uses 'Private Only' mode (which blocks non-linked resources)" -ForegroundColor Gray
+        Write-HostLog ""
+        Write-HostLog "  Validating IP: $LookupAmplsIp" -ForegroundColor Gray
+    }
+
+    Write-ProgressStart -Name "AMPLS Reverse-Lookup"
 
     $ipValidation = Test-AmplsIpParameter -IpAddress $LookupAmplsIp
     if (-not $ipValidation.Valid) {
+        Write-ProgressLine -Name "AMPLS Reverse-Lookup" -Status "FAIL" -SummaryText "IP validation failed for $LookupAmplsIp"
         Write-Result -Status "FAIL" -Check "IP validation failed"
-        Write-HostLog ""
-        Write-HostLog "  $($ipValidation.Reason)" -ForegroundColor Yellow
-        Write-HostLog ""
+        if ($VerboseOutput) {
+            Write-HostLog ""
+            Write-HostLog "  $($ipValidation.Reason)" -ForegroundColor Yellow
+            Write-HostLog ""
+        }
+        Add-Diagnosis -Severity "WARNING" -Title "Manual Lookup: IP validation failed for $LookupAmplsIp" `
+            -Summary $ipValidation.Reason `
+            -Description "The -LookupAmplsIp value '$LookupAmplsIp' failed validation. The IP must be a valid private (RFC1918) IPv4 address that was resolved by one of the Azure Monitor endpoints tested during this run." `
+            -Fix "Re-run the script and supply a private IP address that appears in the DNS resolution results. Use verbose output to see which IPs were resolved." `
+            -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
     } else {
         Write-Result -Status "PASS" -Check "IP validated -- running reverse lookup"
         $ghostResult = Find-AmplsByPrivateIp -TargetIp $LookupAmplsIp
         if ($ghostResult.Found) {
-            Write-HostLog ""
-            Write-HostLog "  AMPLS IDENTIFIED: " -ForegroundColor Cyan -NoNewline
-            Write-HostLog "$($ghostResult.AmplsName)" -ForegroundColor White
-            Write-HostLog "    Resource Group:   $($ghostResult.AmplsRg)" -ForegroundColor Gray
-            Write-HostLog "    Subscription:     $($ghostResult.AmplsSub)" -ForegroundColor Gray
-            Write-HostLog "    Private Endpoint: $($ghostResult.PeName) ($($ghostResult.PeRg))" -ForegroundColor Gray
-            Write-HostLog "    Access Modes:     Ingestion=$($ghostResult.IngestionMode), Query=$($ghostResult.QueryMode)" -ForegroundColor Gray
-            Write-HostLog "    Looked up IP:     $LookupAmplsIp" -ForegroundColor DarkGray
-            Write-HostLog ""
-            Write-HostLog "  This AMPLS owns the private endpoint associated with IP $LookupAmplsIp." -ForegroundColor Yellow
-            Write-HostLog "  If this is not your expected AMPLS, add your resource to this AMPLS or set its access mode to 'Open'." -ForegroundColor Yellow
-            Write-HostLog ""
+            Write-ProgressLine -Name "AMPLS Reverse-Lookup" -Status "INFO" -SummaryText "AMPLS '$($ghostResult.AmplsName)' owns IP $LookupAmplsIp (Ingestion=$($ghostResult.IngestionMode), Query=$($ghostResult.QueryMode))"
+            if ($VerboseOutput) {
+                Write-HostLog ""
+                Write-HostLog "  AMPLS IDENTIFIED: " -ForegroundColor Cyan -NoNewline
+                Write-HostLog "$($ghostResult.AmplsName)" -ForegroundColor White
+                Write-HostLog "    Resource Group:   $($ghostResult.AmplsRg)" -ForegroundColor Gray
+                Write-HostLog "    Subscription:     $($ghostResult.AmplsSub)" -ForegroundColor Gray
+                Write-HostLog "    Private Endpoint: $($ghostResult.PeName) ($($ghostResult.PeRg))" -ForegroundColor Gray
+                Write-HostLog "    Access Modes:     Ingestion=$($ghostResult.IngestionMode), Query=$($ghostResult.QueryMode)" -ForegroundColor Gray
+                Write-HostLog "    Looked up IP:     $LookupAmplsIp" -ForegroundColor DarkGray
+                Write-HostLog ""
+                Write-HostLog "  This AMPLS owns the private endpoint associated with IP $LookupAmplsIp." -ForegroundColor Yellow
+                Write-HostLog "  If this is not your expected AMPLS, add your resource to this AMPLS or set its access mode to 'Open'." -ForegroundColor Yellow
+                Write-HostLog ""
+            }
 
             Add-Diagnosis -Severity "INFO" -Title "Manual Lookup: AMPLS '$($ghostResult.AmplsName)' owns IP $LookupAmplsIp" `
                 -Summary "AMPLS '$($ghostResult.AmplsName)' in RG '$($ghostResult.AmplsRg)' owns the private endpoint for IP $LookupAmplsIp" `
@@ -5269,11 +5426,14 @@ if ($LookupAmplsIp) {
                 -Fix "If this AMPLS is unexpected, add your Azure Monitor resource to it or set its ingestion access mode to 'Open'." `
                 -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
         } else {
-            Write-HostLog ""
-            Write-HostLog "  The private endpoint for IP $LookupAmplsIp could not be identified." -ForegroundColor Yellow
-            Write-HostLog "  It may be in a subscription your account cannot access, or the private" -ForegroundColor Gray
-            Write-HostLog "  DNS zone may have been configured manually." -ForegroundColor Gray
-            Write-HostLog ""
+            Write-ProgressLine -Name "AMPLS Reverse-Lookup" -Status "WARN" -SummaryText "No AMPLS found for IP $LookupAmplsIp"
+            if ($VerboseOutput) {
+                Write-HostLog ""
+                Write-HostLog "  The private endpoint for IP $LookupAmplsIp could not be identified." -ForegroundColor Yellow
+                Write-HostLog "  It may be in a subscription your account cannot access, or the private" -ForegroundColor Gray
+                Write-HostLog "  DNS zone may have been configured manually." -ForegroundColor Gray
+                Write-HostLog ""
+            }
 
             Add-Diagnosis -Severity "INFO" -Title "Manual Lookup: No AMPLS found for IP $LookupAmplsIp" `
                 -Summary "Reverse lookup of $LookupAmplsIp did not find an AMPLS resource in accessible subscriptions" `
@@ -5579,7 +5739,7 @@ if ($CheckAzure -and $aiResource) {
                     }
                 }
 
-                # --- Known Issue #4: Log Analytics reached Daily Cap (OverQuota)---
+                # --- Extract daily cap data for the merged Daily Cap diagnostic ---
                 $capStatus = "Unknown"
                 $capQuotaGb = $null
                 $capResetTime = $null
@@ -5602,55 +5762,7 @@ if ($CheckAzure -and $aiResource) {
                     }
                 } catch { Write-ScriptDebug "Suppressed: $($_.Exception.Message)" }
 
-                if ($capStatus -eq "OverQuota") {
-                    $resetNote = ""
-                    if ($capResetTime) {
-                        $timeUntilReset = $capResetTime - [DateTime]::UtcNow
-                        if ($timeUntilReset.TotalMinutes -gt 0) {
-                            $resetNote = " (resets in ~$([Math]::Floor($timeUntilReset.TotalHours))h $($timeUntilReset.Minutes)m at $($capResetTime.ToString('HH:mm')) UTC)"
-                        } else {
-                            $resetNote = " (reset time has passed, may take a few minutes to resume)"
-                        }
-                    }
-
-                    Add-Diagnosis -Severity "BLOCKING" -Title "Log Analytics Daily Cap Reached (OverQuota)" `
-                        -Summary "Workspace over quota ($($capQuotaGb) GB cap) -- all ingestion stopped" `
-                        -Description "The backend workspace ($wsName) has reached its daily cap of $($capQuotaGb) GB. All ingestion is stopped. The ingestion API still returns HTTP 200, but data is dropped at the LA layer.$resetNote" `
-                        -Fix "Increase or remove the daily cap. The cap resets automatically at the configured reset hour (UTC)." `
-                        -Portal "Log Analytics > Usage and estimated costs > Daily Cap" `
-                        -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
-
-                    if ($VerboseOutput) {
-                        Write-HostLog ""
-                        Write-HostLog "  [!] DAILY CAP REACHED" -ForegroundColor Red
-                        Write-HostLog ""
-                        Write-HostLog "  dataIngestionStatus: " -ForegroundColor Gray -NoNewline
-                        Write-HostLog "OverQuota" -ForegroundColor Red
-                        Write-HostLog "  dailyQuotaGb:        $capQuotaGb GB" -ForegroundColor Gray
-                        if ($capResetTime) {
-                            Write-HostLog "  quotaNextResetTime:  $($capResetTime.ToString('yyyy-MM-dd HH:mm')) UTC$resetNote" -ForegroundColor Gray
-                        }
-                        Write-HostLog ""
-                        Write-HostLog "  IMPACT:" -ForegroundColor Cyan
-                        Write-HostLog "    ALL data ingestion to this workspace is currently stopped." -ForegroundColor Gray
-                        Write-HostLog "    This affects not just this App Insights resource, but any other" -ForegroundColor Gray
-                        Write-HostLog "    data sources sending to the same workspace (other AI resources," -ForegroundColor Gray
-                        Write-HostLog "    AMA agents, Sentinel, etc.)." -ForegroundColor Gray
-                        Write-HostLog ""
-                        Write-HostLog "    The App Insights ingestion API still returns HTTP 200 to SDKs," -ForegroundColor Gray
-                        Write-HostLog "    so your applications believe data is being accepted. It is NOT." -ForegroundColor Gray
-                        Write-HostLog ""
-                        Write-HostLog "  FIX:" -ForegroundColor Cyan
-                        Write-HostLog "    Azure Portal > Log Analytics workspace ($wsName)" -ForegroundColor Gray
-                        Write-HostLog "    > Settings > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
-                        Write-HostLog "    Increase the limit or remove the cap entirely." -ForegroundColor Gray
-                        Write-HostLog ""
-                        Write-HostLog "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap" -ForegroundColor DarkGray
-                        Write-HostLog ""
-                    }
-                    Write-ProgressLine -Name "Backend LA Workspace" -Status "FAIL" -Summary "$wsName exists but OVER DAILY CAP$resetNote"
-                    Write-ProgressLine -Name "Daily Cap" -Status "FAIL" -Summary "OverQuota -- cap: $($capQuotaGb)GB/day$resetNote"
-                } elseif ($capStatus -eq "SubscriptionSuspended") {
+                if ($capStatus -eq "SubscriptionSuspended") {
                     Add-Diagnosis -Severity "BLOCKING" -Title "Azure Subscription Suspended" `
                         -Summary "Subscription suspended -- all ingestion blocked" `
                         -Description "The subscription containing the Log Analytics workspace ($wsName) is suspended. All data ingestion is blocked." `
@@ -5666,34 +5778,13 @@ if ($CheckAzure -and $aiResource) {
                         Write-HostLog "  No data ingestion or queries will work until the subscription is reactivated." -ForegroundColor Gray
                         Write-HostLog ""
                     }
-                    Write-ProgressLine -Name "Backend Workspace" -Status "FAIL" -Summary "$wsName exists but SUBSCRIPTION SUSPENDED"
-                    Write-ProgressLine -Name "Daily Cap" -Status "FAIL" -Summary "SubscriptionSuspended"
+                    Write-ProgressLine -Name "Backend LA Workspace" -Status "FAIL" -Summary "$wsName exists but SUBSCRIPTION SUSPENDED"
                 } else {
-                    # RespectQuota or other normal status
-                    $capSummary = "under quota"
-                    if ($capQuotaGb) {
-                        $capSummary = "cap: $($capQuotaGb) GB/day"
-                    }
-
-                    if ($VerboseOutput) {
-                        Write-HostLog ""
-                        Write-HostLog "  Daily Cap Status:" -ForegroundColor Gray
-                        Write-HostLog "    dataIngestionStatus: " -ForegroundColor Gray -NoNewline
-                        Write-HostLog "$capStatus" -ForegroundColor Green
-                        if ($capQuotaGb) {
-                            Write-HostLog "    dailyQuotaGb:        $capQuotaGb GB" -ForegroundColor Gray
-                        }
-                        if ($capResetTime) {
-                            Write-HostLog "    quotaNextResetTime:  $($capResetTime.ToString('yyyy-MM-dd HH:mm')) UTC" -ForegroundColor Gray
-                        }
-                        Write-HostLog ""
-                    }
                     if ($wsRequireWorkspacePerms) {
-                        Write-ProgressLine -Name "Backend LA Workspace" -Status "INFO" -Summary "$wsName exists, $capSummary, access mode = require workspace permissions"
+                        Write-ProgressLine -Name "Backend LA Workspace" -Status "INFO" -Summary "$wsName exists, access mode = require workspace permissions"
                     } else {
-                        Write-ProgressLine -Name "Backend LA Workspace" -Status "OK" -Summary "$wsName exists, $capSummary"
+                        Write-ProgressLine -Name "Backend LA Workspace" -Status "OK" -Summary "$wsName exists"
                     }
-                    Write-ProgressLine -Name "Daily Cap" -Status "OK" -Summary "RespectQuota ($capSummary)"
                 }
             } elseif ($wsResponse.StatusCode -eq 404) {
                 # --- Known Issue #3: Backend LA workspace is DELETED ---
@@ -5783,9 +5874,9 @@ if ($CheckAzure -and $aiResource) {
     }
 }
 
-# --- Known Issue #5: AI Daily Cap vs LA Daily Cap Misconfigurations ---
+# --- Known Issue #5: Daily Cap ---
 if ($CheckAzure -and $aiResource -and $wsResourceId) {
-    Write-ProgressStart -Name "Daily Cap Settings"
+    Write-ProgressStart -Name "Daily Cap"
     $aiCapGb = $null
     $aiCapOff = $false
     $laCapGb = $capQuotaGb  # already captured from workspace check above
@@ -5794,135 +5885,257 @@ if ($CheckAzure -and $aiResource -and $wsResourceId) {
     if ($VerboseOutput) {
         Write-HostLog ""
         Write-HostLog "  ========================================================================" -ForegroundColor DarkGray
-        Write-HostLog "  KNOWN ISSUE CHECK: Daily Cap Settings (App Insights vs Log Analytics)" -ForegroundColor Cyan
+        Write-HostLog "  KNOWN ISSUE CHECK: Daily Cap" -ForegroundColor Cyan
         Write-HostLog "  ========================================================================" -ForegroundColor DarkGray
         Write-HostLog ""
-        Write-HostLog "  Comparing daily cap settings between App Insights and the backend" -ForegroundColor Gray
-        Write-HostLog "  Log Analytics workspace to detect silent data drop scenarios..." -ForegroundColor Gray
     }
 
-    # Fetch AI daily cap from PricingPlans API
-    try {
-        $aiCapPath = "$($aiResource.id)/PricingPlans/current?api-version=2017-10-01"
-        Write-DebugAzRest -Method "GET" -Path $aiCapPath
-        $aiCapResponse = Invoke-AzRestMethod -Path $aiCapPath -Method GET -ErrorAction Stop
-        Write-DebugResponse -Status "HTTP $($aiCapResponse.StatusCode)" -Body $aiCapResponse.Content
-
-        if ($aiCapResponse.StatusCode -eq 200) {
-            $aiCapContent = $aiCapResponse.Content
-            # Use regex to extract cap value -- the API returns duplicate camelCase/PascalCase
-            # keys which break ConvertFrom-Json on PS 5.1
-            if ($aiCapContent -match '"cap"\s*:\s*([\d.]+)') {
-                $aiCapGb = [double]$Matches[1]
-            }
-            if ($null -eq $aiCapGb -or $aiCapGb -ge 9999) {
-                $aiCapOff = $true
-            }
-        } else {
-            if ($VerboseOutput) {
-                Write-HostLog "  [WARN] Could not retrieve AI PricingPlans (HTTP $($aiCapResponse.StatusCode))" -ForegroundColor Yellow
+    # --- Check: LA OverQuota (daily cap reached at the workspace level) ---
+    if ($capStatus -eq "OverQuota") {
+        $resetNote = ""
+        if ($capResetTime) {
+            $timeUntilReset = $capResetTime - [DateTime]::UtcNow
+            if ($timeUntilReset.TotalMinutes -gt 0) {
+                $resetNote = " (resets in ~$([Math]::Floor($timeUntilReset.TotalHours))h $($timeUntilReset.Minutes)m at $($capResetTime.ToString('HH:mm')) UTC)"
+            } else {
+                $resetNote = " (reset time has passed, may take a few minutes to resume)"
             }
         }
-    }
-    catch {
-        if ($VerboseOutput) {
-            Write-HostLog "  [WARN] Could not query AI PricingPlans API: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
 
-    # --- Comparison Logic ---
-    if ($null -ne $aiCapGb -or $aiCapOff) {
-        $aiCapDisplay = if ($aiCapOff) { "OFF (no limit)" } else { "$aiCapGb GB/day" }
-        $laCapDisplay = if ($laCapOff) { "OFF (no limit)" } else { "$laCapGb GB/day" }
+        Add-Diagnosis -Severity "BLOCKING" -Title "Log Analytics Daily Cap Reached (OverQuota)" `
+            -Summary "Workspace over quota ($($capQuotaGb) GB cap) -- all ingestion stopped" `
+            -Description "The backend workspace ($wsName) has reached its daily cap of $($capQuotaGb) GB. All ingestion is stopped. The ingestion API still returns HTTP 200, but data is dropped at the LA layer.$resetNote" `
+            -Fix "Increase or remove the daily cap. The cap resets automatically at the configured reset hour (UTC)." `
+            -Portal "Log Analytics > Usage and estimated costs > Daily Cap" `
+            -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
 
         if ($VerboseOutput) {
+            Write-HostLog "  [!] DAILY CAP REACHED" -ForegroundColor Red
             Write-HostLog ""
-            Write-HostLog "  App Insights daily cap:    $aiCapDisplay" -ForegroundColor White
-            Write-HostLog "  Log Analytics daily cap:   $laCapDisplay" -ForegroundColor White
+            Write-HostLog "  dataIngestionStatus: " -ForegroundColor Gray -NoNewline
+            Write-HostLog "OverQuota" -ForegroundColor Red
+            Write-HostLog "  dailyQuotaGb:        $capQuotaGb GB" -ForegroundColor Gray
+            if ($capResetTime) {
+                Write-HostLog "  quotaNextResetTime:  $($capResetTime.ToString('yyyy-MM-dd HH:mm')) UTC$resetNote" -ForegroundColor Gray
+            }
+            Write-HostLog ""
+            Write-HostLog "  IMPACT:" -ForegroundColor Cyan
+            Write-HostLog "    ALL data ingestion to this workspace is currently stopped." -ForegroundColor Gray
+            Write-HostLog "    This affects not just this App Insights resource, but any other" -ForegroundColor Gray
+            Write-HostLog "    data sources sending to the same workspace (other AI resources," -ForegroundColor Gray
+            Write-HostLog "    AMA agents, Sentinel, etc.)." -ForegroundColor Gray
+            Write-HostLog ""
+            Write-HostLog "    The App Insights ingestion API still returns HTTP 200 to SDKs," -ForegroundColor Gray
+            Write-HostLog "    so your applications believe data is being accepted. It is NOT." -ForegroundColor Gray
+            Write-HostLog ""
+            Write-HostLog "  FIX:" -ForegroundColor Cyan
+            Write-HostLog "    Azure Portal > Log Analytics workspace ($wsName)" -ForegroundColor Gray
+            Write-HostLog "    > Settings > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
+            Write-HostLog "    Increase the limit or remove the cap entirely." -ForegroundColor Gray
+            Write-HostLog ""
+            Write-HostLog "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap" -ForegroundColor DarkGray
             Write-HostLog ""
         }
+        Write-ProgressLine -Name "Daily Cap" -Status "FAIL" -Summary "OverQuota -- cap: $($capQuotaGb)GB/day$resetNote"
+    } elseif ($capStatus -eq "SubscriptionSuspended") {
+        # Already flagged as BLOCKING in Backend LA Workspace -- just note here
+        Write-ProgressLine -Name "Daily Cap" -Status "FAIL" -Summary "SubscriptionSuspended"
+    } else {
+        # --- Fetch AI daily cap from PricingPlans API ---
+        if ($VerboseOutput) {
+            Write-HostLog "  Comparing daily cap settings between App Insights and the backend" -ForegroundColor Gray
+            Write-HostLog "  Log Analytics workspace to detect silent data drop scenarios..." -ForegroundColor Gray
+        }
 
-        if (-not $laCapOff -and -not $aiCapOff -and $laCapGb -lt $aiCapGb) {
-            # THE KEY SCENARIO: LA cap < AI cap = silent data drop
-            Add-Diagnosis -Severity "WARNING" -Title "Daily Cap Mismatch: LA Cap ($($laCapGb) GB) < AI Cap ($($aiCapGb) GB)" `
-                -Summary "Daily cap mismatch: LA $($laCapGb) GB < AI $($aiCapGb) GB (silent data drop risk)" `
-                -Description "LA workspace hits cap first, silently drops data while SDKs get HTTP 200. Data appears to send successfully but never appears in queries." `
-                -Fix "Align caps: increase LA to >= $($aiCapGb) GB, or decrease AI to <= $($laCapGb) GB." `
-                -Portal "Log Analytics > Usage and estimated costs > Daily Cap" `
-                -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+        try {
+            $aiCapPath = "$($aiResource.id)/PricingPlans/current?api-version=2017-10-01"
+            Write-DebugAzRest -Method "GET" -Path $aiCapPath
+            $aiCapResponse = Invoke-AzRestMethod -Path $aiCapPath -Method GET -ErrorAction Stop
+            Write-DebugResponse -Status "HTTP $($aiCapResponse.StatusCode)" -Body $aiCapResponse.Content
 
-            if ($VerboseOutput) {
-                Write-HostLog "  [!] DAILY CAP MISCONFIGURATION DETECTED" -ForegroundColor Red
-                Write-HostLog ""
-                Write-HostLog "  WHAT HAPPENS:" -ForegroundColor Cyan
-                Write-HostLog "    1. Your SDK sends telemetry to App Insights ingestion API" -ForegroundColor Gray
-                Write-HostLog "    2. App Insights returns HTTP 200 (accepted) -- cap not yet reached" -ForegroundColor Gray
-                Write-HostLog "    3. Data enters the pipeline toward Log Analytics workspace" -ForegroundColor Gray
-                Write-HostLog "    4. LA workspace has already hit its $laCapGb GB daily cap" -ForegroundColor Gray
-                Write-HostLog "    5. Data is SILENTLY DROPPED -- no error is returned to the SDK" -ForegroundColor Gray
-                Write-HostLog ""
-                Write-HostLog "  SCENARIO:" -ForegroundColor Cyan
-                Write-HostLog "    When daily ingestion is between $laCapGb GB and $aiCapGb GB," -ForegroundColor Gray
-                Write-HostLog "    the LA workspace stops accepting data while App Insights keeps" -ForegroundColor Gray
-                Write-HostLog "    telling your SDKs everything is fine." -ForegroundColor Gray
-                Write-HostLog ""
-                Write-HostLog "  FIX:" -ForegroundColor Cyan
-                Write-HostLog "    Option 1: Increase LA daily cap to >= $aiCapGb GB" -ForegroundColor Gray
-                Write-HostLog "      Log Analytics > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
-                Write-HostLog "    Option 2: Decrease AI daily cap to <= $laCapGb GB" -ForegroundColor Gray
-                Write-HostLog "      App Insights > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
-                Write-HostLog "    Option 3: Remove both caps (set to unlimited) and use" -ForegroundColor Gray
-                Write-HostLog "      Azure Cost Management alerts for budget control instead." -ForegroundColor Gray
-                Write-HostLog ""
-                Write-HostLog "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap" -ForegroundColor DarkGray
-                Write-HostLog ""
+            if ($aiCapResponse.StatusCode -eq 200) {
+                $aiCapContent = $aiCapResponse.Content
+                # Use regex to extract cap value -- the API returns duplicate camelCase/PascalCase
+                # keys which break ConvertFrom-Json on PS 5.1
+                if ($aiCapContent -match '"cap"\s*:\s*([\d.]+)') {
+                    $aiCapGb = [double]$Matches[1]
+                }
+                if ($null -eq $aiCapGb -or $aiCapGb -ge 9999) {
+                    $aiCapOff = $true
+                }
+            } else {
+                if ($VerboseOutput) {
+                    Write-HostLog "  [WARN] Could not retrieve AI PricingPlans (HTTP $($aiCapResponse.StatusCode))" -ForegroundColor Yellow
+                }
             }
-            Write-ProgressLine -Name "Daily Cap Settings" -Status "WARN" -Summary "LA cap ($($laCapGb) GB) < AI cap ($($aiCapGb) GB) -- silent data drop risk"
-        } elseif (-not $laCapOff -and $aiCapOff) {
-            # AI cap off but LA has a cap -- LA is the effective limit
-            Add-Diagnosis -Severity "INFO" -Title "Log Analytics Daily Cap is the Effective Limit ($($laCapGb) GB)" `
-                -Summary "LA cap ($($laCapGb) GB) is the effective limit (AI cap is off)" `
-                -Description "App Insights daily cap is OFF (unlimited), but the LA workspace has a $laCapGb GB cap. If you approach $laCapGb GB/day, data will be silently dropped at the LA layer while App Insights continues to accept it (HTTP 200)." `
-                -Fix "Consider setting the AI daily cap to $laCapGb GB so the ingestion API stops accepting data before the LA cap is hit." `
-                -Portal "App Insights > Usage and estimated costs > Daily Cap" `
-                -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+        }
+        catch {
+            if ($VerboseOutput) {
+                Write-HostLog "  [WARN] Could not query AI PricingPlans API: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
+        # --- Comparison Logic ---
+        if ($null -ne $aiCapGb -or $aiCapOff) {
+            $aiCapDisplay = if ($aiCapOff) { "OFF (no limit)" } else { "$aiCapGb GB/day" }
+            $laCapDisplay = if ($laCapOff) { "OFF (no limit)" } else { "$laCapGb GB/day" }
 
             if ($VerboseOutput) {
-                Write-HostLog "  [!] LOG ANALYTICS CAP IS THE EFFECTIVE LIMIT" -ForegroundColor Yellow
                 Write-HostLog ""
-                Write-HostLog "  App Insights has no daily cap, but the backend LA workspace" -ForegroundColor Gray
-                Write-HostLog "  limits ingestion to $laCapGb GB/day. If this is intentional," -ForegroundColor Gray
-                Write-HostLog "  consider also setting the AI daily cap to $laCapGb GB so the" -ForegroundColor Gray
-                Write-HostLog "  ingestion API rejects data before the LA cap is hit. This" -ForegroundColor Gray
-                Write-HostLog "  gives your SDKs visibility into the throttling via non-200 responses." -ForegroundColor Gray
+                Write-HostLog "  App Insights daily cap:    $aiCapDisplay" -ForegroundColor White
+                Write-HostLog "  Log Analytics daily cap:   $laCapDisplay" -ForegroundColor White
                 Write-HostLog ""
             }
-            Write-ProgressLine -Name "Daily Cap Settings" -Status "INFO" -Summary "AI cap OFF, LA cap $($laCapGb) GB/day -- LA is effective limit"
-        } elseif ($laCapOff -and $aiCapOff) {
-            # Both off -- no caps
-            if ($VerboseOutput) {
-                Write-HostLog "  Both daily caps are off. No daily ingestion limit is enforced." -ForegroundColor Green
-                Write-HostLog "  Consider using Azure Cost Management alerts for budget control." -ForegroundColor Gray
-                Write-HostLog ""
+
+            if (-not $laCapOff -and -not $aiCapOff -and $laCapGb -lt $aiCapGb) {
+                # LA cap < AI cap = silent data drop risk
+                Add-Diagnosis -Severity "WARNING" -Title "Daily Cap Mismatch: LA Cap ($($laCapGb) GB) < AI Cap ($($aiCapGb) GB)" `
+                    -Summary "Daily cap mismatch: LA $($laCapGb) GB < AI $($aiCapGb) GB (silent data drop risk)" `
+                    -Description "LA workspace hits cap first, silently drops data while SDKs get HTTP 200. Data appears to send successfully but never appears in queries." `
+                    -Fix "Align caps: increase LA to >= $($aiCapGb) GB, or decrease AI to <= $($laCapGb) GB." `
+                    -Portal "Log Analytics > Usage and estimated costs > Daily Cap" `
+                    -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+
+                if ($VerboseOutput) {
+                    Write-HostLog "  [!] DAILY CAP MISCONFIGURATION DETECTED" -ForegroundColor Red
+                    Write-HostLog ""
+                    Write-HostLog "  WHAT HAPPENS:" -ForegroundColor Cyan
+                    Write-HostLog "    1. Your SDK sends telemetry to App Insights ingestion API" -ForegroundColor Gray
+                    Write-HostLog "    2. App Insights returns HTTP 200 (accepted) -- AI cap not yet reached" -ForegroundColor Gray
+                    Write-HostLog "    3. Data enters the pipeline toward Log Analytics workspace" -ForegroundColor Gray
+                    Write-HostLog "    4. LA workspace has already hit its $laCapGb GB daily cap" -ForegroundColor Gray
+                    Write-HostLog "    5. Data is SILENTLY DROPPED -- no error is returned to the SDK" -ForegroundColor Gray
+                    Write-HostLog ""
+                    Write-HostLog "  SCENARIO:" -ForegroundColor Cyan
+                    Write-HostLog "    When daily ingestion is between $laCapGb GB and $aiCapGb GB," -ForegroundColor Gray
+                    Write-HostLog "    the LA workspace stops accepting data while App Insights keeps" -ForegroundColor Gray
+                    Write-HostLog "    telling your SDKs everything is fine." -ForegroundColor Gray
+                    Write-HostLog ""
+                    Write-HostLog "  FIX:" -ForegroundColor Cyan
+                    Write-HostLog "    Option 1: Increase LA daily cap to >= $aiCapGb GB" -ForegroundColor Gray
+                    Write-HostLog "      Log Analytics > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
+                    Write-HostLog "    Option 2: Decrease AI daily cap to <= $laCapGb GB" -ForegroundColor Gray
+                    Write-HostLog "      App Insights > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
+                    Write-HostLog "    Option 3: Remove both caps (set to unlimited) and use" -ForegroundColor Gray
+                    Write-HostLog "      Azure Cost Management alerts for budget control instead." -ForegroundColor Gray
+                    Write-HostLog ""
+                    Write-HostLog "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap" -ForegroundColor DarkGray
+                    Write-HostLog ""
+                }
+                Write-ProgressLine -Name "Daily Cap" -Status "WARN" -Summary "LA cap ($($laCapGb) GB) < AI cap ($($aiCapGb) GB) -- silent data drop risk"
+            } elseif (-not $laCapOff -and $aiCapOff) {
+                # AI cap off but LA has a cap -- same silent data drop risk as AI > LA
+                Add-Diagnosis -Severity "WARNING" -Title "Silent Data Drop Risk: AI Cap OFF, LA Cap $($laCapGb) GB" `
+                    -Summary "AI cap OFF but LA cap $($laCapGb) GB -- silent data drop risk" `
+                    -Description "App Insights daily cap is OFF (unlimited), but the LA workspace has a $laCapGb GB cap. When ingestion approaches $laCapGb GB/day, data will be silently dropped at the LA layer while App Insights continues to accept it (HTTP 200). This is the same silent data drop risk as when AI cap > LA cap." `
+                    -Fix "Set the AI daily cap to <= $laCapGb GB so the ingestion API rejects data (HTTP 439) before the LA cap is hit, giving your SDKs visibility into the throttling." `
+                    -Portal "App Insights > Usage and estimated costs > Daily Cap" `
+                    -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+
+                if ($VerboseOutput) {
+                    Write-HostLog "  [!] SILENT DATA DROP RISK" -ForegroundColor Yellow
+                    Write-HostLog ""
+                    Write-HostLog "  App Insights has no daily cap (unlimited), but the backend LA" -ForegroundColor Gray
+                    Write-HostLog "  workspace limits ingestion to $laCapGb GB/day. When ingestion" -ForegroundColor Gray
+                    Write-HostLog "  approaches $laCapGb GB, data will be silently dropped at the LA" -ForegroundColor Gray
+                    Write-HostLog "  layer while App Insights continues to accept it (HTTP 200)." -ForegroundColor Gray
+                    Write-HostLog ""
+                    Write-HostLog "  FIX:" -ForegroundColor Cyan
+                    Write-HostLog "    Set the AI daily cap to <= $laCapGb GB so the ingestion API" -ForegroundColor Gray
+                    Write-HostLog "    rejects data (HTTP 439) before the LA cap is hit." -ForegroundColor Gray
+                    Write-HostLog "      App Insights > Usage and estimated costs > Daily Cap" -ForegroundColor Gray
+                    Write-HostLog ""
+                    Write-HostLog "  Docs: https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap" -ForegroundColor DarkGray
+                    Write-HostLog ""
+                }
+                Write-ProgressLine -Name "Daily Cap" -Status "WARN" -Summary "AI cap OFF, LA cap $($laCapGb) GB/day -- silent data drop risk"
+            } elseif ($laCapOff -and $aiCapOff) {
+                # Both off -- no caps
+                if ($VerboseOutput) {
+                    Write-HostLog "  Both daily caps are off. No daily ingestion limit is enforced." -ForegroundColor Green
+                    Write-HostLog "  Consider using Azure Cost Management alerts for budget control." -ForegroundColor Gray
+                    Write-HostLog ""
+                }
+                Write-ProgressLine -Name "Daily Cap" -Status "OK" -Summary "Both caps OFF (no daily limit)"
+            } elseif ($laCapOff -and -not $aiCapOff) {
+                # AI has cap, LA unlimited -- fine
+                # Check if AI cap is very low before printing status
+                $capStatus = "OK"
+                $aiLow = (-not $aiCapOff -and $aiCapGb -lt 0.5)
+
+                if ($aiLow) {
+                    $capStatus = "INFO"
+                    if ($VerboseOutput) {
+                        Write-HostLog "  [i] AI daily cap is very low ($aiCapGb GB/day)." -ForegroundColor Yellow
+                        Write-HostLog "  If telemetry volume exceeds this, the ingestion API will return" -ForegroundColor Gray
+                        Write-HostLog "  HTTP 439 and reject all data until the cap resets." -ForegroundColor Gray
+                        Write-HostLog ""
+                    }
+                    Add-Diagnosis -Severity "INFO" -Title "AI Daily Cap Very Low ($aiCapGb GB/day)" `
+                        -Summary "AI daily cap is very low ($aiCapGb GB/day) -- may cause HTTP 439 rejections" `
+                        -Description "The App Insights daily cap is set to $aiCapGb GB/day. If telemetry volume exceeds this threshold, the ingestion API will return HTTP 439 and reject all further data until the cap resets at the configured reset hour (UTC)." `
+                        -Fix "Review whether this cap is intentional. If not, increase it at App Insights > Usage and estimated costs > Daily Cap." `
+                        -Portal "App Insights > Usage and estimated costs > Daily Cap" `
+                        -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                } else {
+                    if ($VerboseOutput) {
+                        Write-HostLog "  AI daily cap limits ingestion to $aiCapGb GB/day." -ForegroundColor Green
+                    }
+                }
+                if ($VerboseOutput) {
+                    Write-HostLog "  LA workspace has no daily cap -- no silent drops risk." -ForegroundColor Gray
+                    Write-HostLog ""
+                }
+                Write-ProgressLine -Name "Daily Cap" -Status $capStatus -Summary "AI cap $($aiCapGb) GB/day, LA unlimited"
+            } else {
+                # Both have caps, LA >= AI -- properly aligned
+                # Check for low caps before printing status
+                $capStatus = "OK"
+                $aiLow = (-not $aiCapOff -and $aiCapGb -lt 0.5)
+                $laLow = (-not $laCapOff -and $laCapGb -lt 0.5)
+
+                if ($aiLow -or $laLow) {
+                    # Low cap advisory replaces the green "aligned" message
+                    if ($aiLow) {
+                        $capStatus = "INFO"
+                        if ($VerboseOutput) {
+                            Write-HostLog "  [i] AI daily cap is very low ($aiCapGb GB/day)." -ForegroundColor Yellow
+                            Write-HostLog "  If telemetry volume exceeds this, the ingestion API will return" -ForegroundColor Gray
+                            Write-HostLog "  HTTP 439 and reject all data until the cap resets." -ForegroundColor Gray
+                            Write-HostLog ""
+                        }
+                        Add-Diagnosis -Severity "INFO" -Title "AI Daily Cap Very Low ($aiCapGb GB/day)" `
+                            -Summary "AI daily cap is very low ($aiCapGb GB/day) -- may cause HTTP 439 rejections" `
+                            -Description "The App Insights daily cap is set to $aiCapGb GB/day. If telemetry volume exceeds this threshold, the ingestion API will return HTTP 439 and reject all further data until the cap resets at the configured reset hour (UTC)." `
+                            -Fix "Review whether this cap is intentional. If not, increase it at App Insights > Usage and estimated costs > Daily Cap." `
+                            -Portal "App Insights > Usage and estimated costs > Daily Cap" `
+                            -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    }
+                    if ($laLow) {
+                        $capStatus = "INFO"
+                        if ($VerboseOutput) {
+                            Write-HostLog "  [i] LA daily cap is very low ($laCapGb GB/day)." -ForegroundColor Yellow
+                            Write-HostLog "  Other data sources sharing this workspace (AMA agents, Sentinel," -ForegroundColor Gray
+                            Write-HostLog "  Diagnostic Settings) may consume the cap before App Insights data arrives." -ForegroundColor Gray
+                            Write-HostLog ""
+                        }
+                        Add-Diagnosis -Severity "INFO" -Title "LA Daily Cap Very Low ($laCapGb GB/day)" `
+                            -Summary "LA daily cap is very low ($laCapGb GB/day) -- shared cap may starve App Insights" `
+                            -Description "The Log Analytics workspace daily cap is set to $laCapGb GB/day. Other data sources sharing this workspace (AMA agents, Sentinel, Diagnostic Settings) may consume the cap before App Insights telemetry arrives, causing silent data drops." `
+                            -Fix "Review whether this cap is intentional. If not, increase it at Log Analytics > Usage and estimated costs > Daily Cap." `
+                            -Portal "Log Analytics > Usage and estimated costs > Daily Cap" `
+                            -Docs "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    }
+                } else {
+                    if ($VerboseOutput) {
+                        Write-HostLog "  Daily caps are properly aligned (LA cap >= AI cap)." -ForegroundColor Green
+                        Write-HostLog "  The App Insights cap will trigger first, giving SDKs" -ForegroundColor Gray
+                        Write-HostLog "  visibility into throttling before the LA cap is reached." -ForegroundColor Gray
+                        Write-HostLog ""
+                    }
+                }
+                Write-ProgressLine -Name "Daily Cap" -Status $capStatus -Summary "Aligned -- AI cap $($aiCapGb) GB, LA cap $($laCapGb) GB"
             }
-            Write-ProgressLine -Name "Daily Cap Settings" -Status "OK" -Summary "Both caps OFF (no daily limit)"
-        } elseif ($laCapOff -and -not $aiCapOff) {
-            # AI has cap, LA unlimited -- fine
-            if ($VerboseOutput) {
-                Write-HostLog "  AI daily cap limits ingestion to $aiCapGb GB/day." -ForegroundColor Green
-                Write-HostLog "  LA workspace has no daily cap -- no silent drops risk." -ForegroundColor Gray
-                Write-HostLog ""
-            }
-            Write-ProgressLine -Name "Daily Cap Settings" -Status "OK" -Summary "AI cap $($aiCapGb) GB/day, LA unlimited"
-        } else {
-            # Both have caps, LA >= AI -- properly aligned
-            if ($VerboseOutput) {
-                Write-HostLog "  Daily caps are properly aligned (LA cap >= AI cap)." -ForegroundColor Green
-                Write-HostLog "  The App Insights cap will trigger first, giving SDKs" -ForegroundColor Gray
-                Write-HostLog "  visibility into throttling before the LA cap is reached." -ForegroundColor Gray
-                Write-HostLog ""
-            }
-            Write-ProgressLine -Name "Daily Cap Settings" -Status "OK" -Summary "Aligned -- AI cap $($aiCapGb) GB, LA cap $($laCapGb) GB"
         }
     }
 }
@@ -6156,7 +6369,7 @@ resources
 
         $dcrResults = $null
         try {
-            $dcrResults = Search-AzGraph -Query $dcrArgQuery -UseTenantScope -ErrorAction Stop
+            $dcrResults = Search-AzGraph -Query $dcrArgQuery -UseTenantScope -WarningAction SilentlyContinue -ErrorAction Stop
         }
         catch {
             # Fallback: -UseTenantScope may not be available in older module versions
@@ -6450,6 +6663,7 @@ if ($SkipIngestionTest) {
 
         # Build the KQL verification query for use in E2E outcome branches
         $verifyKql = "availabilityResults | where customDimensions.diagnosticRunId == '$($ingestionResult.TestRecordId)'"
+        $manualVerifyReason = $null  # Set by E2E paths that cannot auto-verify; displayed in DIAGNOSIS SUMMARY
 
         # Latency interpretation (verbose only -- doesn't break compact table)
         if ($VerboseOutput -and $ingestionResult.DurationMs -gt 3000) {
@@ -6506,15 +6720,9 @@ if ($SkipIngestionTest) {
             Write-HostLog ""
         }
 
-        # NetworkOnly: show manual verification KQL since E2E won't run
+        # NetworkOnly: store manual verification reason since E2E won't run
         if ($NetworkOnly) {
-            Write-HostLog ""
-            Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-            Write-HostLog "  The ingestion API accepted the test record (HTTP 200), but -NetworkOnly skips" -ForegroundColor DarkGray
-            Write-HostLog "  automated verification. Run the following query in App Insights > Logs to confirm arrival:" -ForegroundColor DarkGray
-            Write-HostLog ""
-            Write-HostLog "  $verifyKql" -ForegroundColor White
-            Write-HostLog ""
+            $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200), but -NetworkOnly skips automated verification. Run the following query in App Insights > Logs to confirm arrival:"
         }
 
         # ================================================================
@@ -6673,18 +6881,10 @@ if ($SkipIngestionTest) {
                             }
 
                         } elseif ($e2eVerification.Status -eq "SKIPPED") {
-                            Write-HostLog ""
-                            Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "Skipped (verify manually with KQL below)"
-                            Write-HostLog ""
-                            Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-                            Write-HostLog "  Automated verification was skipped. The ingestion API accepted the test record (HTTP 200)." -ForegroundColor DarkGray
-                            Write-HostLog "  Run the following query in App Insights > Logs to confirm the record arrived:" -ForegroundColor DarkGray
-                            Write-HostLog ""
-                            Write-HostLog "  $verifyKql" -ForegroundColor White
-                            Write-HostLog ""
+                            Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "Skipped (see verification KQL in Diagnosis Summary)"
+                            $manualVerifyReason = "Automated verification was skipped. The ingestion API accepted the test record (HTTP 200). Run the following query in App Insights > Logs to confirm the record arrived:"
 
                         } elseif ($e2eVerification.Status -eq "TIMEOUT") {
-                            Write-HostLog ""
                             Write-ProgressLine -Name "End-to-End Verification" -Status "INFO" -Summary "Not found after $($e2eVerification.WaitedSeconds)s (pipeline may still be processing)"
                             if ($VerboseOutput) {
                                 Write-HostLog ""
@@ -6692,22 +6892,13 @@ if ($SkipIngestionTest) {
                                 Write-HostLog "  query results yet. This is not necessarily an error -- pipeline processing" -ForegroundColor Gray
                                 Write-HostLog "  can take a few minutes under normal conditions." -ForegroundColor Gray
                             }
-                            Write-HostLog ""
-                            Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-                            Write-HostLog "  The ingestion API accepted the test record (HTTP 200) but it hasn't appeared in query" -ForegroundColor DarkGray
-                            Write-HostLog "  results yet. Run the following query in App Insights > Logs after a few minutes:" -ForegroundColor DarkGray
-                            Write-HostLog ""
-                            Write-HostLog "  $verifyKql" -ForegroundColor White
-                            Write-HostLog ""
+                            $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200) but it hasn't appeared in query results yet. Run the following query in App Insights > Logs after a few minutes:"
 
                         } else {
                             # ERROR status
                             $isAuthError = $e2eVerification.Error -match "Authorization|Unauthorized|Forbidden|Authentication|403|401"
                             $errorSummary = if ($isAuthError) { "Auth failed" } else { "Query failed" }
-                            Write-HostLog ""
-                            Write-ProgressLine -Name "End-to-End Verification" -Status "INFO" -Summary "$errorSummary -- verify manually with KQL below"
-                            Write-HostLog ""
-                            Write-HostLog "  Error: $($e2eVerification.Error)" -ForegroundColor Yellow
+                            Write-ProgressLine -Name "End-to-End Verification" -Status "INFO" -Summary "$errorSummary -- see verification KQL in Diagnosis Summary"
 
                             if ($isAuthError -and $VerboseOutput) {
                                 Write-HostLog ""
@@ -6737,15 +6928,10 @@ if ($SkipIngestionTest) {
                                     Write-HostLog "      -RoleDefinitionName 'Reader' -Scope '/subscriptions/<sub>/resourceGroups/<rg>/providers/microsoft.insights/components/<ai-name>'" -ForegroundColor White
                                 }
                             } elseif (-not $isAuthError -and $VerboseOutput) {
-                                Write-HostLog "  This does not mean ingestion failed -- the API accepted the record (HTTP 200)." -ForegroundColor Gray
+                                Write-HostLog ""
+                                Write-HostLog "  This does not mean ingestion failed yet -- the ingestion API accepted the record (HTTP 200) -- see the manual verification KQL in Diagnosis Summary." -ForegroundColor Gray
                             }
-                            Write-HostLog ""
-                            Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-                            Write-HostLog "  The ingestion API accepted the test record (HTTP 200) but automated verification" -ForegroundColor DarkGray
-                            Write-HostLog "  encountered an error. Run the following query in App Insights > Logs to confirm arrival:" -ForegroundColor DarkGray
-                            Write-HostLog ""
-                            Write-HostLog "  $verifyKql" -ForegroundColor White
-                            Write-HostLog ""
+                            $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200) but automated verification encountered an error. Run the following query in App Insights > Logs to confirm arrival:"
                         }
                 } else {
                     # Token acquisition failed
@@ -6755,14 +6941,8 @@ if ($SkipIngestionTest) {
                         Write-HostLog "      Your account may not have Reader access, or the token endpoint is unreachable." -ForegroundColor DarkGray
                         Write-HostLog ""
                     }
-                    Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "No data plane token (verify manually with KQL below)"
-                    Write-HostLog ""
-                    Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-                    Write-HostLog "  The ingestion API accepted the test record (HTTP 200) but a data plane token could not" -ForegroundColor DarkGray
-                    Write-HostLog "  be acquired for automated verification. Run the following query in App Insights > Logs:" -ForegroundColor DarkGray
-                    Write-HostLog ""
-                    Write-HostLog "  $verifyKql" -ForegroundColor White
-                    Write-HostLog ""
+                    Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "No data plane token (see verification KQL in Diagnosis Summary)"
+                    $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200) but a data plane token could not be acquired for automated verification. Run the following query in App Insights > Logs:"
                 }
             } else {
                 # No AppId available
@@ -6772,19 +6952,13 @@ if ($SkipIngestionTest) {
                     Write-HostLog "      The AppId was not in the connection string or resource properties." -ForegroundColor DarkGray
                     Write-HostLog ""
                 }
-                Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "No Application ID available"
-                Write-HostLog ""
-                Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-                Write-HostLog "  The ingestion API accepted the test record (HTTP 200) but the Application ID needed for" -ForegroundColor DarkGray
-                Write-HostLog "  automated verification was not available. Run the following query in App Insights > Logs:" -ForegroundColor DarkGray
-                Write-HostLog ""
-                Write-HostLog "  $verifyKql" -ForegroundColor White
-                Write-HostLog ""
+                Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "No Application ID available (see verification KQL in Diagnosis Summary)"
+                $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200) but the Application ID needed for automated verification was not available. Run the following query in App Insights > Logs:"
             }
         } elseif (-not $NetworkOnly) {
             # No Azure login available -- can't do automated E2E verification.
             # Show manual verification guidance with KQL query.
-            Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "Azure login not available (verify manually with KQL below)"
+            Write-ProgressLine -Name "End-to-End Verification" -Status "SKIP" -Summary "Azure login not available (see verification KQL in Diagnosis Summary)"
 
             if ($VerboseOutput) {
                 Write-HostLog ""
@@ -6810,14 +6984,7 @@ if ($SkipIngestionTest) {
                 Write-HostLog ""
             }
 
-            Write-HostLog ""
-            Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
-            Write-HostLog "  The ingestion API accepted the test record (HTTP 200) but automated verification" -ForegroundColor DarkGray
-            Write-HostLog "  is not available without an Azure login. Open Azure Portal > App Insights > Logs" -ForegroundColor DarkGray
-            Write-HostLog "  and run this query to confirm the record arrived:" -ForegroundColor DarkGray
-            Write-HostLog ""
-            Write-HostLog "  $verifyKql" -ForegroundColor White
-            Write-HostLog ""
+            $manualVerifyReason = "The ingestion API accepted the test record (HTTP 200) but automated verification is not available without an Azure login. Open Azure Portal > App Insights > Logs and run this query to confirm the record arrived:"
         }
     } elseif ($ingestionResult.Status -eq "INFO") {
         Write-ProgressLine -Name "Telemetry Ingestion" -Status "INFO" -Summary $ingestionResult.Detail
@@ -6852,8 +7019,8 @@ if ($SkipIngestionTest) {
                     $ingFailDocs = "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-configure"
                 }
                 429 {
-                    $ingFailPortal = "App Insights > Usage and estimated costs > Daily Cap"
-                    $ingFailDocs = "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"
+                    $ingFailPortal = ""
+                    $ingFailDocs = "https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/investigate-rate-throttling"
                 }
                 439 {
                     $ingFailPortal = "App Insights > Usage and estimated costs > Daily Cap"
@@ -7008,6 +7175,13 @@ if ($totalIssues -eq 0) {
                 Write-HostLog "  All connectivity and resource configuration checks passed." -ForegroundColor Gray
                 Write-HostLog "  If telemetry from your application is still missing, the issue is likely" -ForegroundColor Gray
                 Write-HostLog "  in SDK/agent configuration, not network connectivity." -ForegroundColor Gray
+                Write-HostLog ""
+                Write-HostLog "  Next steps -- investigate the SDK/Agent:" -ForegroundColor Cyan
+                Write-HostLog "    1. Enable SDK self-diagnostics to see what the SDK is doing internally" -ForegroundColor Gray
+                Write-HostLog "    2. Review SDK Stats for drop codes, auth failures, and sampling decisions" -ForegroundColor Gray
+                Write-HostLog ""
+                Write-HostLog "  Docs: (SDK Logging) https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/enable-self-diagnostics" -ForegroundColor Gray
+                Write-HostLog "  Docs: (SDK Stats)   https://learn.microsoft.com/azure/azure-monitor/app/sdk-stats" -ForegroundColor Gray
             } elseif ($SkipIngestionTest) {
                 Write-HostLog "  Network connectivity and Azure resource configuration checks all passed." -ForegroundColor Gray
                 Write-HostLog "  The telemetry ingestion test was not performed (-SkipIngestionTest)." -ForegroundColor Gray
@@ -7018,6 +7192,13 @@ if ($totalIssues -eq 0) {
                 Write-HostLog "  All connectivity and resource configuration checks passed." -ForegroundColor Gray
                 Write-HostLog "  If telemetry from your application is still missing, the issue is likely" -ForegroundColor Gray
                 Write-HostLog "  in SDK/agent configuration, not network connectivity." -ForegroundColor Gray
+                Write-HostLog ""
+                Write-HostLog "  Next steps -- investigate the SDK/Agent:" -ForegroundColor Cyan
+                Write-HostLog "    1. Enable SDK self-diagnostics to see what the SDK is doing internally" -ForegroundColor Gray
+                Write-HostLog "    2. Review SDK Stats for drop codes, auth failures, and sampling decisions" -ForegroundColor Gray
+                Write-HostLog ""
+                Write-HostLog "  Docs: (SDK Logging) https://learn.microsoft.com/troubleshoot/azure/azure-monitor/app-insights/telemetry/enable-self-diagnostics" -ForegroundColor Gray
+                Write-HostLog "  Docs: (SDK Stats)   https://learn.microsoft.com/azure/azure-monitor/app/sdk-stats" -ForegroundColor Gray
             }
         } else {
             Write-HostLog "========================================================================" -ForegroundColor White
@@ -7059,8 +7240,8 @@ if ($totalIssues -eq 0) {
     # The summary table would be redundant right below them with different terminology.
     if ($VerboseOutput) {
         $findingsLabel = if ($totalIssues -eq 1) { "1 finding" } else { "$totalIssues findings" }
-        # Header color: red if any BLOCKING, yellow otherwise
-        $headerColor = if ($blockingItems.Count -gt 0) { 'Red' } else { 'DarkYellow' }
+        # Header color: red if any BLOCKING, dark-yellow if WARNING, yellow if INFO only
+        $headerColor = if ($blockingItems.Count -gt 0) { 'Red' } elseif ($warningItems.Count -gt 0) { 'DarkYellow' } else { 'Yellow' }
         Write-HostLog " ========================================================================" -ForegroundColor White
         Write-HostLog " DIAGNOSIS SUMMARY" -ForegroundColor $headerColor -NoNewline
         Write-HostLog ("$findingsLabel".PadLeft(72 - "DIAGNOSIS SUMMARY".Length)) -ForegroundColor DarkGray
@@ -7223,6 +7404,16 @@ if ($totalIssues -eq 0) {
 
         Write-HostLog ""
     }
+}
+
+# --- Manual Verification KQL (shown when E2E auto-verify couldn't run) ---
+if ($manualVerifyReason -and $verifyKql) {
+    Write-HostLog ""
+    Write-HostLog "  MANUAL VERIFICATION QUERY:" -ForegroundColor Cyan
+    Write-HostLog "  $manualVerifyReason" -ForegroundColor DarkGray
+    Write-HostLog ""
+    Write-HostLog "  $verifyKql" -ForegroundColor White
+    Write-HostLog ""
 }
 
 # --- Footer (always, part of console output captured by transcript) ---

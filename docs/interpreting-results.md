@@ -46,6 +46,7 @@ the symptom(s) it helps explain:
 | Ingestion Sampling | **X** | | | |
 | Daily Cap Reached | **X** | | | |
 | Daily Cap Mismatch (LA < AI) | **X** | | | |
+| Daily Cap: AI OFF, LA Has Cap | **X** | | | |
 | Subscription Suspended | **X** | | | |
 | Workspace Not Found | **X** | | | |
 | Diagnostic Settings Duplication | | | **X** | |
@@ -87,6 +88,16 @@ with context-specific wording depending on which checks ran:
 | Azure checks ran and resource was found | "No issues found. All checks passed." |
 | Azure checks ran but resource was not found | "Network checks passed. Azure resource checks SKIPPED." |
 | Network-only mode or no Az module | "All network checks passed. Resource checks not performed." |
+
+### What Success Looks Like (Compact Mode)
+
+When all checks pass, compact mode output looks like this:
+
+![Compact mode output showing all checks passed with green OK status across DNS, TCP, TLS, AMPLS, authentication, sampling, workspace, daily cap, diagnostic settings, workspace transforms, telemetry ingestion, and end-to-end verification](images/telemetry-flow-success.png)
+
+Every line shows **OK** in green, confirming that DNS, TCP connectivity, TLS,
+Azure resource configuration, and end-to-end telemetry ingestion are all healthy.
+The footer confirms **no issues found** and all checks passed.
 
 ---
 
@@ -130,7 +141,7 @@ levels, listed here from most to least urgent.
 | Action required | Yes — resolve before investigating anything else. |
 
 Typical causes: DNS resolution failure, TCP port 443 blocked, TLS handshake
-failure, ingestion HTTP error (400/403/429), daily cap reached, backend
+failure, ingestion HTTP error (400/403/429/439), daily cap reached, backend
 workspace deleted, subscription suspended.
 
 ### WARNING
@@ -386,6 +397,15 @@ organised by category.
 | What it means | App Insights thinks it can ingest more data than the workspace will accept. When the workspace cap is hit first, data is silently dropped. The AI cap counter keeps going, so the AI cap page may show "under cap" while data is actually being lost. |
 | Fix | Align the caps — either raise the LA workspace cap to match or exceed the AI cap, or lower the AI cap. |
 
+#### Daily Cap: AI Cap OFF, LA Workspace Has Cap
+
+| Field | Value |
+|-------|-------|
+| Severity | **WARNING** |
+| Trigger | The Application Insights daily cap is OFF (unlimited) but the Log Analytics workspace has a daily cap configured. |
+| What it means | The AI resource will accept unlimited data, but the workspace cap is the effective limit. Other data sources writing to the same workspace (AMA agents, Sentinel, other AI resources, etc.) also contribute toward this cap. If combined ingestion exceeds the workspace cap, data from all sources — including Application Insights — is silently dropped. |
+| Fix | Set an AI daily cap that accounts for the workspace cap and other data sources, or remove the LA workspace cap if cost is not a concern. |
+
 #### Azure Subscription Suspended
 
 | Field | Value |
@@ -490,7 +510,8 @@ organised by category.
 | `400` | Malformed payload or invalid instrumentation key. Verify the connection string. |
 | `401` | Authentication rejected. Check local auth settings or Entra ID token configuration. |
 | `403` | Network access denied. The resource's network isolation settings are blocking this source. |
-| `429` / `439` | Daily cap or throttling. Application Insights daily cap, or the 32,000 items/sec throttling limit has been reached. |
+| `429` | Throttling / rate limiting. The ingestion endpoint is temporarily rejecting requests. Retry after a brief delay. See [throttling docs](https://learn.microsoft.com/azure/azure-monitor/app/ip-addresses). |
+| `439` | Daily cap reached. The workspace or AI resource daily cap has been hit. Ingestion will not resume until the cap resets or is raised. See [Known Issues: Daily Cap Reached](known-issues-reference.md#5-log-analytics-daily-cap-reached). |
 
 #### ARM / Ingestion Auth Mismatch
 

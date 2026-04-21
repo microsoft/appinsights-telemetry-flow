@@ -86,19 +86,25 @@ chmod +x test-appinsights-telemetry-flow.sh
 cd D:\home\LogFiles
 ```
 
-**Option A — Download directly** (if the App Service has outbound access to GitHub):
+> **⚠️ Kudu console limitation:** The Windows Kudu Debug Console does not support
+> `Invoke-WebRequest` (fails with a Win32 console-buffer error) or `Save-Script`
+> (NuGet provider is not installed and cannot be bootstrapped). **Drag and drop
+> (Option A) is the most reliable way to get the script onto the instance.**
+> Options B and C are listed for completeness but may not work in this environment.
 
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
-```
-
-**Option B — Drag and drop** (if outbound access is restricted):
+**Option A — Drag and drop** (recommended for Kudu):
 
 1. Download the script to your local machine from the [GitHub repository](https://github.com/microsoft/appinsights-telemetry-flow).
 2. In the Kudu Debug Console, navigate to `D:\home\LogFiles`.
 3. Drag and drop the `.ps1` file into the folder area at the top of the console.
 
-**Option C — PowerShell Gallery**:
+**Option B — Download directly** (may fail in Kudu — see note above):
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
+```
+
+**Option C — PowerShell Gallery** (may fail in Kudu — see note above):
 
 ```powershell
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
@@ -196,19 +202,24 @@ chmod +x test-appinsights-telemetry-flow.sh
 cd D:\home\LogFiles
 ```
 
-**Option A — Download directly** (if the App Service has outbound access to GitHub):
+> **⚠️ Kudu console limitation:** The Windows Kudu Debug Console does not support
+> `Invoke-WebRequest` or `Save-Script` reliably — see the
+> [Windows App Service notes](#azure-app-service-windows) for details.
+> **Drag and drop (Option A) is the most reliable method.**
 
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
-```
-
-**Option B — Drag and drop** (if outbound access is restricted):
+**Option A — Drag and drop** (recommended for Kudu):
 
 1. Download the script to your local machine from the [GitHub repository](https://github.com/microsoft/appinsights-telemetry-flow).
 2. In the Kudu Debug Console, navigate to `<drive>:\home\LogFiles`.
 3. Drag and drop the `.ps1` file into the folder area at the top of the console.
 
-**Option C — PowerShell Gallery**:
+**Option B — Download directly** (may fail in Kudu — see note above):
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
+```
+
+**Option C — PowerShell Gallery** (may fail in Kudu — see note above):
 
 ```powershell
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
@@ -293,19 +304,23 @@ Standard Logic Apps run on the same App Service platform.
 cd D:\home\LogFiles
 ```
 
-**Option A — Download directly** (if the App Service has outbound access to GitHub):
+> **⚠️ Kudu console limitation:** Same as [Windows App Service](#azure-app-service-windows) —
+> `Invoke-WebRequest` and `Save-Script` do not work reliably in the Kudu console.
+> **Use drag and drop (Option A).**
 
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
-```
-
-**Option B — Drag and drop** (if outbound access is restricted):
+**Option A — Drag and drop** (recommended for Kudu):
 
 1. Download the script to your local machine from the [GitHub repository](https://github.com/microsoft/appinsights-telemetry-flow).
 2. In the Kudu Debug Console, navigate to `D:\home\LogFiles`.
 3. Drag and drop the `.ps1` file into the folder area at the top of the console.
 
-**Option C — PowerShell Gallery**:
+**Option B — Download directly** (may fail in Kudu — see note above):
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/appinsights-telemetry-flow/main/powershell/Test-AppInsightsTelemetryFlow.ps1" -OutFile "Test-AppInsightsTelemetryFlow.ps1"
+```
+
+**Option C — PowerShell Gallery** (may fail in Kudu — see note above):
 
 ```powershell
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
@@ -681,6 +696,11 @@ Then run the script:
 
 ### Environment-specific notes
 
+- **Execution policy:** Windows 10/11 client machines default to `Restricted` in PowerShell 5.1, which blocks all scripts — even signed ones. If you get a "running scripts is disabled" error, run once:
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+  This persists across sessions. PowerShell 7 (`pwsh`) defaults to `RemoteSigned` and does not need this step. Enterprise machines with Group Policy may already have this set.
 - Full PowerShell environment with color output. Best experience for reviewing verbose output.
 - Install `Az.Accounts` and `Az.ResourceGraph` modules for Azure resource checks: `Install-Module Az.Accounts, Az.ResourceGraph`.
 - Network results reflect your developer machine's DNS and outbound path — useful for local debugging but may differ from production (different DNS servers, corporate proxy, VPN).
